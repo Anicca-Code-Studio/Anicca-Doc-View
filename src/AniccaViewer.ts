@@ -1,0 +1,2470 @@
+/**
+ * AniccaViewer - Document viewer component.
+ *
+ * Binds to a loaded document and optionally provides UI.
+ * Created via `client.createViewer()`.
+ */
+
+import type { WorkerClient, PageInfo, RenderType, FontUsageEntry, AnnotationsByPage } from "./worker/index.js";
+import type { ViewerOptions } from "./AniccaClient.js";
+import { mountViewerShell, type ViewerShell, type InitialStateOverrides } from "./ui/viewer/shell.js";
+import type { PrintDialogResult, PrintPageRange, PrintQuality } from "./ui/viewer/components/PrintDialog.js";
+import type { Destination, OutlineItem, ScrollAlignment } from "./ui/viewer/navigation.js";
+import {
+    renderAnnotationsToLayer,
+    applyAnnotationPatch,
+    type Annotation,
+    type AnnotationPatch,
+} from "./ui/viewer/annotation/index.js";
+import { extractPageText } from "./ui/viewer/search/index.js";
+export type { Annotation, AnnotationPatch } from "./ui/viewer/annotation/index.js";
+export type { SearchMatch } from "./ui/viewer/state.js";
+import type { LayoutPage } from "./worker/index.js";
+import {
+    getFormatDefaults,
+    type DocumentFormat,
+    type ViewModeDefaults,
+    type ViewMode,
+    type PanelTab,
+    type ScrollMode,
+    type LayoutMode,
+    type ZoomMode,
+    type PageRotation,
+    type SpacingMode,
+    type ThemeMode,
+    type VisibilityGroup,
+    type SearchMatch,
+    type ActiveTool,
+    type ToolKind,
+} from "./ui/viewer/state.js";
+import { PerformanceCounter, NoOpPerformanceCounter, type IPerformanceCounter } from "./performance/index.js";
+
+/**
+ * Options for rendering a page.
+ */
+export interface RenderOptions {
+    /**
+     * Scale factor for rendering.
+     * 1 = 72 DPI (1 point = 1 pixel)
+     * 2 = 144 DPI (retina)
+     * @default 1
+     */
+    scale?: number;
+
+    /**
+     * Output format.
+     * @default 'image-data'
+     */
+    format?: "image-data" | "image-bitmap" | "blob" | "data-url";
+
+    /**
+     * Image type when format is 'blob' or 'data-url'.
+     * @default 'image/png'
+     */
+    imageType?: "image/png" | "image/jpeg";
+
+    /**
+     * JPEG quality (0-1) when imageType is 'image/jpeg'.
+     * @default 0.92
+     */
+    quality?: number;
+
+    /**
+     * Include annotations in render.
+     * @default true
+     */
+    annotations?: boolean;
+
+    /**
+     * Skip all cache and queue, call worker directly.
+     * Useful for one-off renders that shouldn't affect the render queue.
+     * @default false
+     */
+    force?: boolean;
+
+    /**
+     * Boost render priority by calling boostRenderPage before rendering.
+     * This prioritizes this page and nearby pages in the render queue.
+     * @default false
+     */
+    boost?: boolean;
+}
+
+/**
+ * Rendered page result.
+ */
+export type RenderedPage = ImageData | ImageBitmap | Blob | string;
+
+/**
+ * Document metadata.
+ */
+export interface DocumentMetadata {
+    title?: string;
+    author?: string;
+    subject?: string;
+    keywords?: string;
+    creator?: string;
+    producer?: string;
+    creationDate?: Date;
+    modificationDate?: Date;
+}
+
+/**
+ * Re-export navigation types for public API.
+ */
+export type { Destination, DestinationDisplay, OutlineItem, ScrollAlignment } from "./ui/viewer/navigation.js";
+
+/**
+ * Document loading progress information.
+ */
+export interface LoadProgress {
+    /** Bytes loaded so far. */
+    loaded: number;
+    /** Total bytes (may be 0 if Content-Length not available). */
+    total: number;
+    /** Progress percentage 0-100 (null if total unknown). */
+    percent: number | null;
+}
+
+/**
+ * UI component identifier for visibility events.
+ */
+export type UIComponent =
+    | "toolbar"
+    | "floatingToolbar"
+    | "leftPanel"
+    | "rightPanel"
+    | "fullscreen"
+    | "download"
+    | "print"
+    | PanelTab;
+
+/**
+ * Event map for viewer events.
+ */
+export interface ViewerEventMap {
+    "document:loading": LoadProgress;
+    "document:load": { pageCount: number };
+    "document:close": Record<string, never>;
+    download: { filename: string };
+    /** Fires on the actual print, not when the print dialog opens. */
+    print: { pageCount: number };
+    error: { error: Error; phase: "fetch" | "parse" | "render" };
+    "page:change": { page: number; previousPage: number };
+    "ui:visibilityChange": { component: UIComponent; visible: boolean };
+    "panel:change": { panel: PanelTab | null; previousPanel: PanelTab | null };
+    "font:usageChange": { entries: FontUsageEntry[] };
+    "search:change": { matches: SearchMatch[]; activeIndex: number };
+    "annotation:add": { pageIndex: number; annotation: Annotation };
+    "annotation:update": { pageIndex: number; annotation: Annotation };
+    "annotation:remove": { pageIndex: number; annotation: Annotation };
+    "annotation:select": { pageIndex: number; annotation: Annotation } | null;
+    /**
+     * Fires when the pointer enters or leaves an annotation element on a
+     * rendered page. Always emitted regardless of the active tool — including
+     * during normal viewing. Payload is `null` when the pointer leaves the
+     * currently hovered annotation without entering another. `clientX`/
+     * `clientY` are the pointer's browser-viewport coordinates at the moment
+     * of the hover change (rotation- and zoom-invariant; suitable for placing
+     * a tooltip in screen space).
+     */
+    "annotation:hover": { pageIndex: number; annotation: Annotation; clientX: number; clientY: number } | null;
+    /**
+     * Fires when the user clicks an annotation on a rendered page. Always
+     * emitted regardless of the active tool, in addition to (and before) any
+     * built-in click handling such as link navigation or sticky-note popups.
+     * `clientX`/`clientY` are the pointer's browser-viewport coordinates at
+     * the click (rotation- and zoom-invariant; suitable for anchoring a
+     * context menu or popover in screen space).
+     */
+    "annotation:click": { pageIndex: number; annotation: Annotation; clientX: number; clientY: number };
+    /**
+     * Fires when the user's view of the document changes — scroll position,
+     * zoom, layout, or scroll-mode changes that affect which pages are
+     * visible. Throttled to once per animation frame, and de-duped so
+     * adjacent identical payloads are coalesced.
+     */
+    "viewport:change": {
+        /** First page index (0-based) at least partially visible. */
+        firstVisiblePage: number;
+        /** Last page index (0-based) at least partially visible. */
+        lastVisiblePage: number;
+        /** Current zoom factor (1 = 100%). */
+        zoom: number;
+        /** Vertical scroll offset of the viewport in CSS pixels. */
+        scrollTop: number;
+    };
+}
+
+type EventHandler<K extends keyof ViewerEventMap> = (payload: ViewerEventMap[K]) => void;
+
+/**
+ * Generate a unique annotation identifier suitable for the PDF NM entry.
+ * Uses crypto.randomUUID() when available, falling back to a Math.random
+ * shim for environments (older Safari, Node < 19) without it.
+ */
+function generateAnnotationId(): string {
+    const cryptoObj = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+    if (cryptoObj?.randomUUID) return cryptoObj.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+        const r = (Math.random() * 16) | 0;
+        const v = c === "x" ? r : (r & 0x3) | 0x8;
+        return v.toString(16);
+    });
+}
+
+/**
+ * Document viewer component.
+ *
+ * Supports both UI mode (with container) and headless mode (without container).
+ * Use `client.createViewer()` to create instances.
+ */
+export class AniccaViewer {
+    private workerClient: WorkerClient;
+    private container: HTMLElement | null = null;
+    private uiShell: ViewerShell | null = null;
+    private documentId: string | null = null;
+    private _pageCount = 0;
+    private _pageInfo: PageInfo[] = [];
+    private destroyed = false;
+    private eventHandlers = new Map<keyof ViewerEventMap, Set<EventHandler<keyof ViewerEventMap>>>();
+    private _performanceCounter: IPerformanceCounter;
+    private viewOverrides: ViewModeDefaults;
+    private currentFormat: DocumentFormat | null = null;
+    private sourceFilename: string | null = null;
+    private storeUnsub: (() => void) | null = null;
+    private actionUnsub: (() => void) | null = null;
+    private fontUsageUnsub: (() => void) | null = null;
+    private sdkVersion: string;
+
+    /**
+     * @internal
+     * Use `client.createViewer()` instead.
+     */
+    constructor(
+        workerClient: WorkerClient,
+        options: ViewerOptions = {},
+        showAttribution = true,
+        showLoadingOverlay = true,
+        sdkVersion = "__VERSION__",
+    ) {
+        this.workerClient = workerClient;
+        this.sdkVersion = sdkVersion;
+        this.viewOverrides = this.buildViewModeOverrides(options);
+
+        // Initialize performance counter
+        if (options.enablePerformanceCounter) {
+            const counter = new PerformanceCounter();
+            this._performanceCounter = counter;
+            if (options.onPerformanceLog) {
+                counter.onLog(options.onPerformanceLog);
+            }
+        } else {
+            this._performanceCounter = new NoOpPerformanceCounter();
+        }
+
+        // Subscribe to font usage changes from the worker
+        this.fontUsageUnsub = this.workerClient.onFontUsageChanged(async (docId) => {
+            if (this.documentId !== docId) return;
+            try {
+                const entries = await this.workerClient.getFontUsage(docId);
+                if (this.destroyed || this.documentId !== docId) return;
+                this.emit("font:usageChange", { entries: entries as FontUsageEntry[] });
+            } catch {
+                // Worker terminated or document closed mid-flight — ignore
+            }
+        });
+
+        if (options.container) {
+            this.container = this.resolveContainer(options.container);
+            const overrides = this.buildStateOverrides(options);
+            this.uiShell = mountViewerShell(
+                this.container,
+                this.createEngineAdapter(),
+                this.workerClient,
+                overrides,
+                showAttribution,
+                showLoadingOverlay,
+                options.locale,
+                options.translations,
+                options.customPageOverlay,
+            );
+
+            // Set up callbacks for shell events
+            this.uiShell.setCallbacks({
+                onPasswordSubmit: (password: string) => this.handlePasswordSubmit(password),
+                onDownload: () => this.download(),
+                onPrint: (options) => this.print(options),
+                onViewportChange: (payload) => this.emit("viewport:change", payload),
+                onAnnotationHover: (payload) => this.emit("annotation:hover", payload),
+                onAnnotationClick: (payload) => this.emit("annotation:click", payload),
+            });
+
+            // Subscribe to store state changes to emit public events
+            this.storeUnsub = this.uiShell.store.subscribeEffect((prev, next) => {
+                if (prev.page !== next.page) {
+                    this.emit("page:change", { page: next.page, previousPage: prev.page });
+                }
+                if (prev.activePanel !== next.activePanel) {
+                    this.emit("panel:change", { panel: next.activePanel, previousPanel: prev.activePanel });
+                }
+                if (prev.toolbarVisible !== next.toolbarVisible) {
+                    this.emit("ui:visibilityChange", { component: "toolbar", visible: next.toolbarVisible });
+                }
+                if (prev.floatingToolbarVisible !== next.floatingToolbarVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "floatingToolbar",
+                        visible: next.floatingToolbarVisible,
+                    });
+                }
+                if (prev.leftPanelVisible !== next.leftPanelVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "leftPanel",
+                        visible: next.leftPanelVisible,
+                    });
+                }
+                if (prev.rightPanelVisible !== next.rightPanelVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "rightPanel",
+                        visible: next.rightPanelVisible,
+                    });
+                }
+                if (prev.fullscreenButtonVisible !== next.fullscreenButtonVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "fullscreen",
+                        visible: next.fullscreenButtonVisible,
+                    });
+                }
+                if (prev.downloadButtonVisible !== next.downloadButtonVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "download",
+                        visible: next.downloadButtonVisible,
+                    });
+                }
+                if (prev.printButtonVisible !== next.printButtonVisible) {
+                    this.emit("ui:visibilityChange", {
+                        component: "print",
+                        visible: next.printButtonVisible,
+                    });
+                }
+                if (prev.searchMatches !== next.searchMatches || prev.searchActiveIndex !== next.searchActiveIndex) {
+                    this.emit("search:change", {
+                        matches: next.searchMatches,
+                        activeIndex: next.searchActiveIndex,
+                    });
+                }
+                if (prev.disabledPanels !== next.disabledPanels) {
+                    // Emit events for panels whose disabled state changed
+                    const allPanels: PanelTab[] = [
+                        "thumbnail",
+                        "outline",
+                        "bookmarks",
+                        "layers",
+                        "attachments",
+                        "fonts",
+                        "search",
+                        "comments",
+                    ];
+                    for (const panel of allPanels) {
+                        const wasDisabled = prev.disabledPanels.has(panel);
+                        const isDisabled = next.disabledPanels.has(panel);
+                        if (wasDisabled !== isDisabled) {
+                            this.emit("ui:visibilityChange", { component: panel, visible: !isDisabled });
+                        }
+                    }
+                }
+            });
+
+            // Forward annotation mutations as public events. Subscribing at the
+            // action layer (rather than diffing state) lets us include the
+            // exact affected annotation in the payload — including the removed
+            // one, which we look up in `prev` before the reducer dropped it.
+            this.actionUnsub = this.uiShell.store.subscribeAction((action, prev, next) => {
+                switch (action.type) {
+                    case "ADD_ANNOTATION":
+                        this.emit("annotation:add", {
+                            pageIndex: action.pageIndex,
+                            annotation: action.annotation,
+                        });
+                        break;
+                    case "ADD_ANNOTATIONS":
+                        for (const annotation of action.annotations) {
+                            this.emit("annotation:add", {
+                                pageIndex: action.pageIndex,
+                                annotation,
+                            });
+                        }
+                        break;
+                    case "UPDATE_ANNOTATION":
+                        this.emit("annotation:update", {
+                            pageIndex: action.pageIndex,
+                            annotation: action.annotation,
+                        });
+                        break;
+                    case "UPDATE_ANNOTATIONS":
+                        for (const { annotation } of action.updates) {
+                            this.emit("annotation:update", {
+                                pageIndex: action.pageIndex,
+                                annotation,
+                            });
+                        }
+                        break;
+                    case "REMOVE_ANNOTATION": {
+                        const removed = prev.pageAnnotations.get(action.pageIndex)?.[action.annotationIndex];
+                        if (removed) {
+                            this.emit("annotation:remove", {
+                                pageIndex: action.pageIndex,
+                                annotation: removed,
+                            });
+                        }
+                        break;
+                    }
+                    case "SELECT_ANNOTATION": {
+                        const ann = next.pageAnnotations.get(action.pageIndex)?.[action.annotationIndex];
+                        if (ann) {
+                            this.emit("annotation:select", {
+                                pageIndex: action.pageIndex,
+                                annotation: ann,
+                            });
+                        }
+                        break;
+                    }
+                    case "DESELECT_ANNOTATION":
+                        this.emit("annotation:select", null);
+                        break;
+                }
+            });
+        }
+    }
+
+    /**
+     * Performance counter for tracking operation timings.
+     * Only records data when `enablePerformanceCounter` is true.
+     */
+    get performanceCounter(): IPerformanceCounter {
+        return this._performanceCounter;
+    }
+
+    private buildStateOverrides(options: ViewerOptions): InitialStateOverrides {
+        const overrides: InitialStateOverrides = {};
+
+        if (options.scrollMode !== undefined) overrides.scrollMode = options.scrollMode;
+        if (options.layoutMode !== undefined) overrides.layoutMode = options.layoutMode;
+        if (options.zoomMode !== undefined) overrides.zoomMode = options.zoomMode;
+        if (options.zoom !== undefined) overrides.zoom = options.zoom;
+        if (options.zoomSteps !== undefined) overrides.zoomSteps = options.zoomSteps;
+        if (options.dpi !== undefined) overrides.dpi = options.dpi;
+        if (options.pageSpacing !== undefined) overrides.pageSpacing = options.pageSpacing;
+        if (options.spreadSpacing !== undefined) overrides.spreadSpacing = options.spreadSpacing;
+        if (options.thumbnailWidth !== undefined) overrides.thumbnailWidth = options.thumbnailWidth;
+        if (options.navigationScrollAlignment !== undefined)
+            overrides.navigationScrollAlignment = options.navigationScrollAlignment;
+        if (options.searchScrollAlignment !== undefined)
+            overrides.searchScrollAlignment = options.searchScrollAlignment;
+        if (options.activePanel !== undefined) overrides.activePanel = options.activePanel;
+        if (options.hideToolbar) overrides.toolbarVisible = false;
+        if (options.hideFloatingToolbar) overrides.floatingToolbarVisible = false;
+        if (options.disableFullscreen) overrides.fullscreenButtonVisible = false;
+        if (options.disableDownload) overrides.downloadButtonVisible = false;
+        if (options.disablePrint) overrides.printButtonVisible = false;
+        if (options.disableLeftPanel) overrides.leftPanelVisible = false;
+        if (options.disableRightPanel) overrides.rightPanelVisible = false;
+        if (options.theme !== undefined) overrides.theme = options.theme;
+        if (options.disableThemeSwitching) overrides.themeSwitchingDisabled = true;
+        if (options.disableTextSelection) overrides.textSelectionDisabled = true;
+        if (options.pageRotation !== undefined) overrides.pageRotation = options.pageRotation;
+        if (options.spacingMode !== undefined) overrides.spacingMode = options.spacingMode;
+        if (options.minZoom !== undefined) overrides.minZoom = options.minZoom;
+        if (options.maxZoom !== undefined) overrides.maxZoom = options.maxZoom;
+        if (options.enableTransitions) overrides.transitionsEnabled = true;
+
+        // Collect individually disabled panels into the internal Set
+        const disabled: PanelTab[] = [];
+        if (options.disableThumbnails) disabled.push("thumbnail");
+        if (options.disableOutline) disabled.push("outline");
+        if (options.disableBookmarks) disabled.push("bookmarks");
+        if (options.disableLayers) disabled.push("layers");
+        if (options.disableAttachments) disabled.push("attachments");
+        if (options.disableFonts) disabled.push("fonts");
+        if (options.disableSearch) disabled.push("search");
+        if (options.disableComments) disabled.push("comments");
+        if (disabled.length > 0) {
+            overrides.disabledPanels = new Set(disabled);
+        }
+
+        // Collect disabled tools into the internal Set
+        // Default: all disabled. Only remove from the set when explicitly not disabled (false).
+        const disabledTools: ToolKind[] = [];
+        if (options.disableViewTools) {
+            disabledTools.push("pointer", "hand", "zoom");
+        }
+        if (options.disableAnnotateTools) {
+            disabledTools.push("annotate");
+        }
+        if (options.__experimentalDisableMarkupTools !== false) {
+            disabledTools.push("markup");
+        }
+        overrides.disabledTools = new Set(disabledTools);
+
+        return overrides;
+    }
+
+    private buildViewModeOverrides(options: ViewerOptions): ViewModeDefaults {
+        const overrides: ViewModeDefaults = {};
+
+        if (options.scrollMode !== undefined) overrides.scrollMode = options.scrollMode;
+        if (options.layoutMode !== undefined) overrides.layoutMode = options.layoutMode;
+        if (options.zoomMode !== undefined) overrides.zoomMode = options.zoomMode;
+        if (options.zoom !== undefined) overrides.zoom = options.zoom;
+        if (options.pageSpacing !== undefined) overrides.pageSpacing = options.pageSpacing;
+        if (options.spreadSpacing !== undefined) overrides.spreadSpacing = options.spreadSpacing;
+        if (options.pageRotation !== undefined) overrides.pageRotation = options.pageRotation;
+        if (options.spacingMode !== undefined) overrides.spacingMode = options.spacingMode;
+
+        return overrides;
+    }
+
+    private computeViewDefaults(format: DocumentFormat): ViewModeDefaults {
+        return { ...getFormatDefaults(format), ...this.viewOverrides };
+    }
+
+    // ===========================================================================
+    // Document Loading
+    // ===========================================================================
+
+    /**
+     * Load a document.
+     *
+     * @param source - URL string, File object, or raw bytes
+     */
+    async load(source: string | File | Uint8Array): Promise<void> {
+        this.ensureNotDestroyed();
+
+        // Reset performance counter and start timing
+        this._performanceCounter.reset();
+        this._performanceCounter.setLoadStartTime();
+
+        // Close any existing document
+        if (this.documentId) {
+            this.close();
+        }
+
+        try {
+            // Track download phase
+            const downloadId = this._performanceCounter.markStart("download");
+            const { bytes, filename } = await this.resolveSourceWithFilename(source);
+            this.sourceFilename = filename ?? null;
+            this._performanceCounter.markEnd(downloadId);
+
+            // Show processing state while WASM loads and extracts page info
+            this.uiShell?.dispatch({ type: "SET_PROCESSING", processing: true });
+
+            // Load document — WASM auto-detects format from file contents
+            const loadId = this._performanceCounter.markStart("load");
+            this.documentId = await this.workerClient.loadDocument(bytes);
+            this._performanceCounter.markEnd(loadId);
+
+            // Get the detected format from WASM for UI defaults
+            const format = (await this.workerClient.getDocumentFormat(this.documentId)) as DocumentFormat;
+            this.currentFormat = format;
+
+            // Register performance counter with WorkerClient for this document
+            // This enables tracking of all subsequent operations (getPageInfo, render, etc.)
+            if (this._performanceCounter.enabled) {
+                this.workerClient.setPerformanceCounter(this.documentId, this._performanceCounter);
+            }
+
+            // Check if document needs password
+            const passwordRequired = await this.workerClient.needsPassword(this.documentId);
+
+            if (passwordRequired) {
+                // Document needs password - show dialog and wait for authentication
+                if (this.uiShell) {
+                    this.uiShell.dispatch({
+                        type: "SET_DOC",
+                        doc: { id: this.documentId },
+                        documentFormat: format,
+                        pageCount: 0,
+                        pageInfos: [],
+                        pageGroups: [],
+                        viewDefaults: this.computeViewDefaults(format),
+                    });
+                    this.uiShell.dispatch({ type: "SET_PROCESSING", processing: false });
+                    this.uiShell.dispatch({ type: "SET_NEEDS_PASSWORD", needsPassword: true });
+                }
+                // Don't emit document:load yet - wait for successful authentication
+                return;
+            }
+
+            // Load all page info upfront (fast operation)
+            this._pageInfo = await this.workerClient.getAllPageInfo(this.documentId);
+            this._pageCount = this._pageInfo.length;
+            const pageGroups = await this.workerClient.getPageGroups(this.documentId);
+
+            if (this.uiShell) {
+                const initUiId = this._performanceCounter.markStart("initUiShell");
+                this.uiShell.dispatch({
+                    type: "SET_DOC",
+                    doc: { id: this.documentId },
+                    documentFormat: format,
+                    pageCount: this._pageCount,
+                    pageInfos: this._pageInfo,
+                    pageGroups,
+                    viewDefaults: this.computeViewDefaults(format),
+                });
+                this._performanceCounter.markEnd(initUiId);
+                this.uiShell.dispatch({ type: "SET_PROCESSING", processing: false });
+            }
+
+            this.emit("document:load", { pageCount: this._pageCount });
+        } catch (error) {
+            this.uiShell?.dispatch({ type: "SET_PROCESSING", processing: false });
+            const phase = error instanceof TypeError ? "fetch" : "parse";
+            this.emit("error", { error: error as Error, phase });
+            throw error;
+        }
+    }
+
+    /**
+     * Close the current document.
+     * Viewer returns to empty state.
+     */
+    close(): void {
+        if (this.documentId) {
+            const docId = this.documentId;
+
+            // Clear document state first so UI callbacks from invalidateRenderCache
+            // see no active document and skip re-rendering.
+            this.documentId = null;
+            this._pageCount = 0;
+            this._pageInfo = [];
+            this.sourceFilename = null;
+
+            // Remove performance counter for this document
+            this.workerClient.removePerformanceCounter(docId);
+
+            // Cancel pending renders, clear cached bitmaps, then unload from worker.
+            // Use clearRenderCache (no callbacks) instead of invalidateRenderCache
+            // to avoid triggering UI re-renders for a document being removed.
+            this.workerClient.cancelRenders(docId);
+            this.workerClient.clearRenderCache(docId);
+            this.workerClient.unloadPdf(docId).catch(() => {
+                // Ignore errors during close
+            });
+            if (this.uiShell) {
+                this.uiShell.dispatch({ type: "CLEAR_DOC" });
+            }
+            this.emit("document:close", {});
+        }
+    }
+
+    /**
+     * Whether a document is currently loaded.
+     */
+    get isLoaded(): boolean {
+        return this.documentId !== null;
+    }
+
+    /**
+     * Check if the loaded document requires a password to open.
+     * @returns True if the document needs authentication before pages can be accessed.
+     */
+    async needsPassword(): Promise<boolean> {
+        this.ensureLoaded();
+        return this.workerClient.needsPassword(this.documentId!);
+    }
+
+    /**
+     * Authenticate with a password to unlock an encrypted document.
+     *
+     * After successful authentication, page info is reloaded and the document
+     * becomes fully accessible.
+     *
+     * @param password - The password to try
+     * @returns True if authentication succeeded, false if the password was incorrect.
+     */
+    async authenticate(password: string): Promise<boolean> {
+        this.ensureLoaded();
+
+        // Dispatch authenticating state for UI
+        if (this.uiShell) {
+            this.uiShell.dispatch({ type: "AUTHENTICATE_START" });
+        }
+
+        try {
+            const success = await this.workerClient.authenticate(this.documentId!, password);
+
+            if (success) {
+                // Clear any cached renders from before authentication (they would be invalid)
+                this.workerClient.cancelRenders(this.documentId!);
+                this.workerClient.invalidateRenderCache(this.documentId!);
+
+                // Reload page info after successful authentication
+                this._pageInfo = await this.workerClient.getAllPageInfo(this.documentId!);
+                this._pageCount = this._pageInfo.length;
+                const pageGroups = await this.workerClient.getPageGroups(this.documentId!);
+
+                if (this.uiShell) {
+                    this.uiShell.dispatch({ type: "AUTHENTICATE_SUCCESS" });
+                    this.uiShell.dispatch({
+                        type: "SET_DOC",
+                        doc: { id: this.documentId! },
+                        documentFormat: this.currentFormat ?? "pdf",
+                        pageCount: this._pageCount,
+                        pageInfos: this._pageInfo,
+                        pageGroups,
+                        viewDefaults: this.currentFormat ? this.computeViewDefaults(this.currentFormat) : undefined,
+                    });
+                }
+
+                this.emit("document:load", { pageCount: this._pageCount });
+            } else {
+                if (this.uiShell) {
+                    this.uiShell.dispatch({ type: "AUTHENTICATE_FAILURE", error: "Incorrect password" });
+                }
+            }
+
+            return success;
+        } catch (error) {
+            if (this.uiShell) {
+                this.uiShell.dispatch({
+                    type: "AUTHENTICATE_FAILURE",
+                    error: error instanceof Error ? error.message : "Authentication failed",
+                });
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Handle password submission from the UI dialog.
+     * @internal
+     */
+    private async handlePasswordSubmit(password: string): Promise<void> {
+        try {
+            await this.authenticate(password);
+        } catch {
+            // Error is already dispatched to UI in authenticate()
+        }
+    }
+
+    // ===========================================================================
+    // Document Information
+    // ===========================================================================
+
+    /**
+     * Total number of pages.
+     * Returns 0 if no document is loaded.
+     */
+    get pageCount(): number {
+        return this._pageCount;
+    }
+
+    /**
+     * Document metadata (title, author, etc.).
+     * Returns null if no document is loaded.
+     */
+    get metadata(): DocumentMetadata | null {
+        // TODO: Implement metadata retrieval from WASM
+        if (!this.documentId) return null;
+        return {};
+    }
+
+    /**
+     * Get document outline (table of contents / bookmarks).
+     */
+    async getOutline(): Promise<OutlineItem[]> {
+        this.ensureLoaded();
+        const raw = await this.workerClient.getOutline(this.documentId!);
+        return raw as OutlineItem[];
+    }
+
+    /**
+     * Get font usage information for the loaded document.
+     *
+     * Returns how each font spec in the document was resolved,
+     * including primary resolution and any glyph-fallback fonts.
+     * This information is populated during rendering — call after
+     * at least one page has been rendered for results.
+     */
+    async getFontUsage(): Promise<FontUsageEntry[]> {
+        this.ensureLoaded();
+        const raw = await this.workerClient.getFontUsage(this.documentId!);
+        return raw as FontUsageEntry[];
+    }
+
+    /**
+     * Get page dimensions in points (1 point = 1/72 inch).
+     * @param page - Page index (0-based)
+     */
+    async getPageInfo(page: number): Promise<PageInfo> {
+        this.ensureLoaded();
+        if (page < 0 || page >= this._pageCount) {
+            throw new Error(`Page index ${page} out of bounds (0-${this._pageCount - 1})`);
+        }
+        // Return cached info if available
+        if (this._pageInfo[page]) {
+            return this._pageInfo[page];
+        }
+        // Fetch from worker if not loaded yet
+        const info = await this.workerClient.getPageInfo(this.documentId!, page);
+        this._pageInfo[page] = info;
+        return info;
+    }
+
+    /**
+     * Get annotations on a specific page.
+     *
+     * Returns the in-memory state if the page has been edited in this
+     * session; otherwise reads from the worker.
+     *
+     * Returned `bounds` (and every other geometry field) are in the page's
+     * unrotated MediaBox coordinate space — origin top-left, units in PDF
+     * points, +y downward — regardless of the page's `/Rotate` value.
+     * See {@link Rect} for the full coordinate convention.
+     *
+     * @param page - Page index (0-based)
+     */
+    async getPageAnnotations(page: number): Promise<Annotation[]> {
+        this.ensureLoaded();
+        const fromState = this.uiShell?.store.getState().pageAnnotations.get(page);
+        if (fromState) return fromState;
+        const raw = await this.workerClient.getPageAnnotations(this.documentId!, page);
+        return raw as Annotation[];
+    }
+
+    /**
+     * Add a new annotation to a page.
+     *
+     * If `annotation.name` is omitted, a UUID is generated and assigned. The
+     * returned value is the annotation as inserted (with `name` populated),
+     * which is the same identifier the engine will write to the PDF's NM
+     * entry on save.
+     *
+     * Pass `ephemeral: true` to create a viewer-only annotation that renders
+     * but is excluded from saved PDF bytes and from print output. The same
+     * `updatePageAnnotation` / `removePageAnnotation` calls work for both kinds, and
+     * `updatePageAnnotation` can flip the `ephemeral` flag to promote a preview
+     * into a saved annotation (or demote a saved one to viewer-only).
+     *
+     * **Coordinate space:** `annotation.bounds` and all per-type geometry
+     * (line endpoints, polygon vertices, ink strokes, quads, callout lines,
+     * …) must be in the page's **unrotated MediaBox** coordinate space —
+     * origin top-left, PDF points, +y downward — *not* the displayed/rotated
+     * orientation. The viewer applies `/Rotate` (and the user's rotation
+     * toggle) as a display transform on top of MediaBox-space bounds. See
+     * {@link Rect} for the full convention. The {@link getPageAnnotations}
+     * round-trip uses the same space, so a value read out and added back is
+     * always in the right frame.
+     *
+     * Annotation editing currently requires UI mode (a `container` was passed
+     * to `client.createViewer`) and is supported on PDF documents only.
+     *
+     * @param page - Page index (0-based)
+     * @returns The inserted annotation (with `name` populated).
+     */
+    async addPageAnnotation(page: number, annotation: Annotation): Promise<Annotation> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        await this.ensurePageAnnotationsLoaded(page);
+        const withId: Annotation = annotation.name ? annotation : { ...annotation, name: generateAnnotationId() };
+        this.uiShell!.dispatch({ type: "ADD_ANNOTATION", pageIndex: page, annotation: withId });
+        return withId;
+    }
+
+    /**
+     * Add multiple annotations to a page in a single batch.
+     *
+     * Equivalent to calling {@link addPageAnnotation} once per item, but
+     * applied as a single store update — one render and one dirty-flag flip
+     * per page instead of N. Use this when importing or restoring many
+     * annotations on the same page.
+     *
+     * Each annotation gets a generated `name` (UUID) if one is not provided.
+     * The returned array preserves input order with `name` populated.
+     *
+     * `annotation:add` still fires once per annotation, in input order, so
+     * existing single-event listeners just work.
+     *
+     * Geometry coordinate space matches {@link addPageAnnotation} — unrotated
+     * MediaBox, origin top-left, PDF points, +y downward. See {@link Rect}.
+     *
+     * @param page - Page index (0-based)
+     * @param annotations - Annotations to insert (may mix ephemeral and saved)
+     * @returns The inserted annotations (each with `name` populated).
+     */
+    async addPageAnnotations(page: number, annotations: Annotation[]): Promise<Annotation[]> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        if (annotations.length === 0) return [];
+        await this.ensurePageAnnotationsLoaded(page);
+        const withIds: Annotation[] = annotations.map((a) => (a.name ? a : { ...a, name: generateAnnotationId() }));
+        this.uiShell!.dispatch({ type: "ADD_ANNOTATIONS", pageIndex: page, annotations: withIds });
+        return withIds;
+    }
+
+    /**
+     * Update an existing annotation, identified by its `name` (NM).
+     *
+     * Looks up the annotation on the given page by `name` and replaces it
+     * with the supplied value. The replacement keeps the same `name` even
+     * if a different one is passed in `annotation.name`.
+     *
+     * Geometry on the replacement must be in unrotated MediaBox coordinates
+     * — see {@link Rect}.
+     *
+     * @param page - Page index (0-based)
+     * @param name - The annotation's `name` (NM).
+     * @param annotation - The replacement annotation.
+     * @returns The updated annotation.
+     * @throws If no annotation with the given `name` is found on the page.
+     */
+    async updatePageAnnotation(page: number, name: string, annotation: Annotation): Promise<Annotation> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        const index = await this.findAnnotationIndex(page, name);
+        const updated: Annotation = { ...annotation, name };
+        this.uiShell!.dispatch({
+            type: "UPDATE_ANNOTATION",
+            pageIndex: page,
+            annotationIndex: index,
+            annotation: updated,
+        });
+        return updated;
+    }
+
+    /**
+     * Update multiple annotations on a page in a single batch.
+     *
+     * Equivalent to calling {@link updatePageAnnotation} once per item, but
+     * applied as a single store update — one render and one dirty-flag flip
+     * per page instead of N. Each entry's existing `name` is preserved even
+     * if a different one is set on its `annotation`.
+     *
+     * `annotation:update` still fires once per entry, in input order.
+     *
+     * Validation is atomic: if any `name` cannot be found on the page, the
+     * call throws *before* any annotation is updated.
+     *
+     * @param page - Page index (0-based)
+     * @param updates - Pairs of `{ name, annotation }` to replace.
+     * @returns The updated annotations, in input order.
+     * @throws If any `name` is not found on the page.
+     */
+    async updatePageAnnotations(
+        page: number,
+        updates: Array<{ name: string; annotation: Annotation }>,
+    ): Promise<Annotation[]> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        if (updates.length === 0) return [];
+        await this.ensurePageAnnotationsLoaded(page);
+        const resolved = updates.map(({ name, annotation }) => ({
+            annotationIndex: this.requireAnnotationIndex(page, name),
+            annotation: { ...annotation, name } as Annotation,
+        }));
+        this.uiShell!.dispatch({ type: "UPDATE_ANNOTATIONS", pageIndex: page, updates: resolved });
+        return resolved.map((r) => r.annotation);
+    }
+
+    /**
+     * Patch an existing annotation, identified by its `name` (NM).
+     *
+     * Unlike {@link updatePageAnnotation}, which replaces the entire
+     * annotation, this only overwrites the fields present in `patch`.
+     * Everything else (geometry, other style fields, contents, etc.) is
+     * preserved. Use this when you want to tweak one or two properties —
+     * for example, change a highlight's color — without round-tripping the
+     * full annotation.
+     *
+     * Semantics:
+     * - `type` and `name` in the patch are silently ignored.
+     * - `metadata` is shallow-merged one level deep, so patching
+     *   `{ metadata: { contents } }` keeps the existing `author`/`subject`.
+     * - `undefined` values are skipped, not treated as "clear this field".
+     *   Use `updatePageAnnotation` for full replacement when you need to
+     *   clear fields by omission.
+     *
+     * @param page - Page index (0-based)
+     * @param name - The annotation's `name` (NM).
+     * @param patch - Fields to merge into the existing annotation.
+     * @returns The patched annotation.
+     * @throws If no annotation with the given `name` is found on the page.
+     */
+    async patchPageAnnotation(page: number, name: string, patch: AnnotationPatch): Promise<Annotation> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        const index = await this.findAnnotationIndex(page, name);
+        const existing = this.uiShell!.store.getState().pageAnnotations.get(page)![index];
+        const updated = applyAnnotationPatch(existing, patch);
+        this.uiShell!.dispatch({
+            type: "UPDATE_ANNOTATION",
+            pageIndex: page,
+            annotationIndex: index,
+            annotation: updated,
+        });
+        return updated;
+    }
+
+    /**
+     * Patch multiple annotations on a page in a single batch.
+     *
+     * Equivalent to calling {@link patchPageAnnotation} once per item, but
+     * applied as a single store update — one render and one dirty-flag flip
+     * per page instead of N. Patches are resolved against the *current*
+     * annotation state (not against each other in sequence); patching the
+     * same `name` twice in one call applies both, with the second winning.
+     *
+     * `annotation:update` still fires once per entry, in input order.
+     *
+     * Validation is atomic: if any `name` cannot be found on the page, the
+     * call throws *before* any annotation is patched.
+     *
+     * @param page - Page index (0-based)
+     * @param patches - Pairs of `{ name, patch }` to apply.
+     * @returns The patched annotations, in input order.
+     * @throws If any `name` is not found on the page.
+     */
+    async patchPageAnnotations(
+        page: number,
+        patches: Array<{ name: string; patch: AnnotationPatch }>,
+    ): Promise<Annotation[]> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        if (patches.length === 0) return [];
+        await this.ensurePageAnnotationsLoaded(page);
+        const list = this.uiShell!.store.getState().pageAnnotations.get(page)!;
+        const resolved = patches.map(({ name, patch }) => {
+            const annotationIndex = this.requireAnnotationIndex(page, name);
+            const merged = applyAnnotationPatch(list[annotationIndex], patch);
+            const annotation: Annotation = { ...merged, name } as Annotation;
+            return { annotationIndex, annotation };
+        });
+        this.uiShell!.dispatch({ type: "UPDATE_ANNOTATIONS", pageIndex: page, updates: resolved });
+        return resolved.map((r) => r.annotation);
+    }
+
+    /**
+     * Remove an annotation, identified by its `name` (NM).
+     *
+     * @param page - Page index (0-based)
+     * @param name - The annotation's `name` (NM).
+     * @throws If no annotation with the given `name` is found on the page.
+     */
+    async removePageAnnotation(page: number, name: string): Promise<void> {
+        this.ensureLoaded();
+        this.ensureUiMode();
+        const index = await this.findAnnotationIndex(page, name);
+        this.uiShell!.dispatch({ type: "REMOVE_ANNOTATION", pageIndex: page, annotationIndex: index });
+    }
+
+    /**
+     * Ensure pageAnnotations is populated for a page so that mutator actions
+     * have a baseline list to operate on. The reducer's ADD path tolerates a
+     * missing page, but UPDATE/REMOVE need the existing annotations loaded
+     * so we don't silently lose what the worker has.
+     */
+    private async ensurePageAnnotationsLoaded(page: number): Promise<void> {
+        const state = this.uiShell!.store.getState();
+        if (state.pageAnnotations.has(page)) return;
+        const raw = (await this.workerClient.getPageAnnotations(this.documentId!, page)) as Annotation[];
+        this.uiShell!.dispatch({ type: "SET_PAGE_ANNOTATIONS", pageIndex: page, annotations: raw });
+    }
+
+    private async findAnnotationIndex(page: number, name: string): Promise<number> {
+        await this.ensurePageAnnotationsLoaded(page);
+        return this.requireAnnotationIndex(page, name);
+    }
+
+    /**
+     * Synchronous variant of `findAnnotationIndex` for callers that have
+     * already awaited `ensurePageAnnotationsLoaded` — used by the batch
+     * mutators so all per-item lookups happen against a stable, loaded list.
+     */
+    private requireAnnotationIndex(page: number, name: string): number {
+        const list = this.uiShell!.store.getState().pageAnnotations.get(page) ?? [];
+        const index = list.findIndex((a) => a.name === name);
+        if (index < 0) {
+            throw new Error(`No annotation with name "${name}" on page ${page}`);
+        }
+        return index;
+    }
+
+    /**
+     * Get the layout structure for a specific page.
+     * Returns frames, parcels, lines, runs, glyphs, tables, and grids
+     * without building the full display list.
+     * All coordinates are in points (1/72 inch).
+     * @param page - Page index (0-based)
+     */
+    async getLayoutPage(page: number): Promise<LayoutPage> {
+        this.ensureLoaded();
+        if (page < 0 || page >= this._pageCount) {
+            throw new Error(`Page index ${page} out of bounds (0-${this._pageCount - 1})`);
+        }
+        return (await this.workerClient.getLayoutPage(this.documentId!, page)) as LayoutPage;
+    }
+
+    /**
+     * Get the plain text of a page, matching exactly what the search engine sees.
+     *
+     * Text is extracted from the layout model: glyph runs are concatenated in
+     * visual order, with spaces/tabs rendered as " ", paragraph ends and line
+     * breaks as "\n", and inline drawings as U+FFFC (object replacement char).
+     *
+     * @param page - Page index (0-based)
+     */
+    async getPageText(page: number): Promise<string> {
+        const layout = await this.getLayoutPage(page);
+        return extractPageText(layout);
+    }
+
+    // ===========================================================================
+    // Navigation
+    // ===========================================================================
+
+    /**
+     * Get the current page number (1-based).
+     */
+    get currentPage(): number {
+        if (this.uiShell) {
+            return this.uiShell.getState().page;
+        }
+        return 1;
+    }
+
+    /**
+     * Navigate to a specific page.
+     * @param page - Page number (1-based)
+     */
+    goToPage(page: number): void {
+        this.ensureNotDestroyed();
+        if (!this.uiShell) {
+            throw new Error("Navigation requires UI mode (container must be provided)");
+        }
+        this.uiShell.dispatch({ type: "NAVIGATE_TO_PAGE", page });
+    }
+
+    /**
+     * Navigate to a destination (page + position + zoom).
+     * @param destination - Full destination object with page index and display mode
+     * @param options - Optional navigation options
+     * @param options.scrollAlignment - How to align the target in the viewport:
+     *   "top" (default), "center", "bottom", or "nearest" (minimal scroll to fit in view)
+     */
+    goToDestination(destination: Destination, options?: { scrollAlignment?: ScrollAlignment }): void {
+        this.ensureNotDestroyed();
+        if (!this.uiShell) {
+            throw new Error("Navigation requires UI mode (container must be provided)");
+        }
+        this.uiShell.dispatch({
+            type: "NAVIGATE_TO_DESTINATION",
+            destination,
+            scrollAlignment: options?.scrollAlignment,
+        });
+    }
+
+    /**
+     * Navigate to the next page.
+     */
+    nextPage(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        const state = this.uiShell!.getState();
+        if (state.page < state.pageCount) {
+            this.uiShell!.dispatch({ type: "NAVIGATE_TO_PAGE", page: state.page + 1 });
+        }
+    }
+
+    /**
+     * Navigate to the previous page.
+     */
+    previousPage(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        const state = this.uiShell!.getState();
+        if (state.page > 1) {
+            this.uiShell!.dispatch({ type: "NAVIGATE_TO_PAGE", page: state.page - 1 });
+        }
+    }
+
+    // ===========================================================================
+    // Zoom
+    // ===========================================================================
+
+    /**
+     * Current zoom level (1 = 100%).
+     */
+    get zoom(): number {
+        if (this.uiShell) {
+            const state = this.uiShell.getState();
+            return state.zoomMode === "custom" ? state.zoom : (state.effectiveZoom ?? state.zoom);
+        }
+        return 1;
+    }
+
+    /**
+     * Current zoom mode.
+     */
+    get zoomMode(): ZoomMode {
+        if (this.uiShell) {
+            return this.uiShell.getState().zoomMode;
+        }
+        return "fit-spread-width";
+    }
+
+    /**
+     * Zoom in to the next zoom step.
+     */
+    zoomIn(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "ZOOM_IN" });
+    }
+
+    /**
+     * Zoom out to the previous zoom step.
+     */
+    zoomOut(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "ZOOM_OUT" });
+    }
+
+    /**
+     * Set zoom to a specific level (1 = 100%). Switches to custom zoom mode.
+     */
+    setZoom(zoom: number): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_ZOOM", zoom });
+    }
+
+    /**
+     * Set zoom mode.
+     */
+    setZoomMode(mode: ZoomMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_ZOOM_MODE", mode });
+    }
+
+    // ===========================================================================
+    // View Modes
+    // ===========================================================================
+
+    /** Current scroll mode. */
+    get scrollMode(): ScrollMode {
+        return this.uiShell?.getState().scrollMode ?? "continuous";
+    }
+
+    /** Current layout mode. */
+    get layoutMode(): LayoutMode {
+        return this.uiShell?.getState().layoutMode ?? "single-page";
+    }
+
+    /** Current page rotation in degrees. */
+    get pageRotation(): PageRotation {
+        return this.uiShell?.getState().pageRotation ?? 0;
+    }
+
+    /** Current spacing mode. */
+    get spacingMode(): SpacingMode {
+        return this.uiShell?.getState().spacingMode ?? "all";
+    }
+
+    /** Whether the viewer is in fullscreen mode. */
+    get isFullscreen(): boolean {
+        return this.uiShell?.getState().isFullscreen ?? false;
+    }
+
+    /** Current view mode. */
+    get viewMode(): ViewMode {
+        return this.uiShell?.getState().viewMode ?? "paged";
+    }
+
+    /**
+     * Set view mode (paged or continuous).
+     */
+    setViewMode(mode: ViewMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_VIEW_MODE", mode });
+    }
+
+    /**
+     * Get the current view mode.
+     */
+    getViewMode(): ViewMode {
+        return this.viewMode;
+    }
+
+    /**
+     * Set scroll mode.
+     */
+    setScrollMode(mode: ScrollMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_SCROLL_MODE", mode });
+    }
+
+    /** Default scroll alignment for navigation (outline, links, goToDestination). */
+    get navigationScrollAlignment(): ScrollAlignment {
+        return this.uiShell?.getState().navigationScrollAlignment ?? "top";
+    }
+
+    /** Default scroll alignment for search result navigation. */
+    get searchScrollAlignment(): ScrollAlignment {
+        return this.uiShell?.getState().searchScrollAlignment ?? "center";
+    }
+
+    /**
+     * Set the default scroll alignment for navigation (outline, links, goToDestination).
+     */
+    setNavigationScrollAlignment(alignment: ScrollAlignment): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_NAVIGATION_SCROLL_ALIGNMENT", alignment });
+    }
+
+    /**
+     * Set the default scroll alignment for search result navigation.
+     */
+    setSearchScrollAlignment(alignment: ScrollAlignment): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_SEARCH_SCROLL_ALIGNMENT", alignment });
+    }
+
+    /**
+     * Set page layout mode.
+     */
+    setLayoutMode(mode: LayoutMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_LAYOUT_MODE", mode });
+    }
+
+    /**
+     * Set page rotation.
+     */
+    setPageRotation(rotation: PageRotation): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_PAGE_ROTATION", rotation });
+    }
+
+    /**
+     * Set spacing mode.
+     */
+    setSpacingMode(mode: SpacingMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_SPACING_MODE", mode });
+    }
+
+    /**
+     * Enter or exit fullscreen mode.
+     */
+    setFullscreen(fullscreen: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_FULLSCREEN", isFullscreen: fullscreen });
+        // Also toggle the actual browser fullscreen
+        const root = this.container?.querySelector(".adv-viewer-root") as HTMLElement | null;
+        if (root) {
+            if (fullscreen && !document.fullscreenElement) {
+                root.requestFullscreen().catch(() => {});
+            } else if (!fullscreen && document.fullscreenElement) {
+                document.exitFullscreen().catch(() => {});
+            }
+        }
+    }
+
+    // ===========================================================================
+    // UI Component Visibility
+    // ===========================================================================
+
+    /**
+     * Show or hide the top toolbar.
+     */
+    setToolbarVisible(visible: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_TOOLBAR_VISIBLE", visible });
+    }
+
+    /**
+     * Show or hide the floating toolbar (page navigation, zoom, view mode controls).
+     */
+    setFloatingToolbarVisible(visible: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_FLOATING_TOOLBAR_VISIBLE", visible });
+    }
+
+    /**
+     * Currently active tool, as a tagged union. The `kind` is one of `"pointer"`,
+     * `"hand"`, `"zoom"`, `"annotate"`, `"markup"`; for `"annotate"` and `"markup"`
+     * a `sub` field carries the active sub-tool (`"freehand"`, `"highlight"`, etc.).
+     */
+    get activeTool(): ActiveTool {
+        return this.uiShell?.getState().activeTool ?? { kind: "pointer" };
+    }
+
+    /**
+     * Switch the currently active tool. Tool-set kinds (`"annotate"`, `"markup"`)
+     * require a `sub`, e.g. `{ kind: "annotate", sub: "freehand" }`. Calling
+     * this with the same tool-set kind that's already active toggles back to
+     * the pointer tool, matching the toolbar UI.
+     */
+    setActiveTool(tool: ActiveTool): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_ACTIVE_TOOL", tool });
+    }
+
+    /**
+     * Enable or disable the fullscreen button.
+     */
+    setFullscreenEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_FULLSCREEN_BUTTON_VISIBLE", visible: enabled });
+    }
+
+    /**
+     * Enable or disable the download button.
+     */
+    setDownloadEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_DOWNLOAD_BUTTON_VISIBLE", visible: enabled });
+    }
+
+    /**
+     * Enable or disable the print button.
+     */
+    setPrintEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_PRINT_BUTTON_VISIBLE", visible: enabled });
+    }
+
+    /** Current theme mode. */
+    get theme(): ThemeMode {
+        return this.uiShell?.getState().theme ?? "light";
+    }
+
+    /**
+     * Set the viewer color theme.
+     * @param theme - 'light', 'dark', or 'system'
+     */
+    setTheme(theme: ThemeMode): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_THEME", theme });
+    }
+
+    /**
+     * Enable or disable the theme toggle button in the toolbar.
+     */
+    setThemeSwitchingEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_THEME_SWITCHING_DISABLED", disabled: !enabled });
+    }
+
+    /**
+     * Enable or disable text selection in the viewer.
+     */
+    setTextSelectionEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_TEXT_SELECTION_DISABLED", disabled: !enabled });
+    }
+
+    /**
+     * Set the minimum zoom level.
+     */
+    setMinZoom(zoom: number): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_MIN_ZOOM", zoom });
+    }
+
+    /**
+     * Set the maximum zoom level.
+     */
+    setMaxZoom(zoom: number): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_MAX_ZOOM", zoom });
+    }
+
+    /**
+     * Enable or disable the entire left panel area.
+     * When disabled, the left panel is hidden and all left panel tabs are inaccessible.
+     */
+    setLeftPanelEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_LEFT_PANEL_VISIBLE", visible: enabled });
+    }
+
+    /**
+     * Enable or disable the entire right panel area.
+     * When disabled, the right panel is hidden and all right panel tabs are inaccessible.
+     */
+    setRightPanelEnabled(enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_RIGHT_PANEL_VISIBLE", visible: enabled });
+    }
+
+    /**
+     * Enable or disable a specific panel tab.
+     * Disabled panels are removed from the UI and cannot be opened.
+     * If the panel is currently open and being disabled, it will be closed.
+     */
+    setPanelEnabled(panel: PanelTab, enabled: boolean): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_PANEL_DISABLED", panel, disabled: !enabled });
+    }
+
+    /**
+     * Open a specific panel.
+     * Has no effect if the panel is disabled via `setPanelEnabled()` or a `disable*` option.
+     */
+    openPanel(panel: PanelTab): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "TOGGLE_PANEL", panel });
+        // If it was already open, TOGGLE_PANEL closed it. Re-open.
+        if (this.uiShell!.getState().activePanel !== panel) {
+            this.uiShell!.dispatch({ type: "TOGGLE_PANEL", panel });
+        }
+    }
+
+    /**
+     * Close the currently open panel.
+     */
+    closePanel(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "CLOSE_PANEL" });
+    }
+
+    // ===========================================================================
+    // Search
+    // ===========================================================================
+
+    /**
+     * Search for text in the document.
+     * Returns a promise that resolves with the final search matches once all page text
+     * has been loaded and the search completes. Highlight overlays are rendered automatically.
+     *
+     * Results are also available via the `search:change` event (fires for intermediate
+     * results as pages load) and the `searchMatches` getter.
+     *
+     * @param query - The text to search for
+     * @param options - Search options
+     * @param options.caseSensitive - Whether to match case (overrides current default)
+     * @param options.fuzzy - Enable fuzzy matching. When true, all whitespace, control
+     *   characters, pipes (`|`), and zero-width characters are stripped from both the
+     *   query and the document text before comparison. This allows AI-generated citations
+     *   to match even when spacing or separators differ from the original document
+     *   (e.g. `"cell A | cell B"` will match `"cell A\ncell B"`).
+     * @param options.pageRange - Inclusive 0-based page range `[start, end]` to restrict
+     *   search to. Both text loading and match collection are limited to this range.
+     *   Omit to search the entire document. Each `search()` call is self-contained —
+     *   the range is reset to "all pages" unless explicitly provided.
+     * @returns Promise resolving with the search matches
+     */
+    search(
+        query: string,
+        options?: { caseSensitive?: boolean; fuzzy?: boolean; pageRange?: [number, number] | null },
+    ): Promise<SearchMatch[]> {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+
+        const stateBefore = this.uiShell!.getState();
+        if (options?.caseSensitive !== undefined) {
+            this.uiShell!.dispatch({ type: "SET_SEARCH_CASE_SENSITIVE", caseSensitive: options.caseSensitive });
+        }
+        if (options?.fuzzy !== undefined) {
+            this.uiShell!.dispatch({ type: "SET_SEARCH_FUZZY", fuzzy: options.fuzzy });
+        }
+        const range = options?.pageRange ? { start: options.pageRange[0], end: options.pageRange[1] } : null;
+        this.uiShell!.dispatch({ type: "SET_SEARCH_PAGE_RANGE", range });
+        this.uiShell!.dispatch({ type: "SET_SEARCH_QUERY", query });
+
+        // Empty/whitespace query — resolve immediately
+        if (!query.trim()) {
+            return Promise.resolve([]);
+        }
+
+        // Nothing changed (same query and options) — return current results
+        const stateAfter = this.uiShell!.getState();
+        if (stateBefore === stateAfter) {
+            return Promise.resolve(stateAfter.searchMatches);
+        }
+
+        return new Promise<SearchMatch[]>((resolve) => {
+            const unsub = this.uiShell!.store.subscribeEffect((prev, next) => {
+                // Query was superseded by another search() call — resolve empty
+                if (next.searchQuery !== query) {
+                    unsub();
+                    resolve([]);
+                    return;
+                }
+
+                // Resolve when text is fully loaded and search results have been computed
+                // (skip the initial matches clear from SET_SEARCH_QUERY by checking query is stable)
+                if (
+                    next.searchTextLoaded &&
+                    prev.searchQuery === next.searchQuery &&
+                    prev.searchMatches !== next.searchMatches
+                ) {
+                    unsub();
+                    resolve(next.searchMatches);
+                }
+            });
+        });
+    }
+
+    /**
+     * Navigate to the next search match.
+     * @param options - Optional overrides for this navigation
+     * @param options.scrollAlignment - Override scroll alignment for this call only
+     */
+    searchNext(options?: { scrollAlignment?: ScrollAlignment }): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SEARCH_NEXT", scrollAlignment: options?.scrollAlignment });
+    }
+
+    /**
+     * Navigate to the previous search match.
+     * @param options - Optional overrides for this navigation
+     * @param options.scrollAlignment - Override scroll alignment for this call only
+     */
+    searchPrev(options?: { scrollAlignment?: ScrollAlignment }): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SEARCH_PREV", scrollAlignment: options?.scrollAlignment });
+    }
+
+    /**
+     * Clear the current search query and results.
+     */
+    clearSearch(): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "CLEAR_SEARCH" });
+    }
+
+    /**
+     * Get the current search matches.
+     */
+    get searchMatches(): SearchMatch[] {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        return this.uiShell!.getState().searchMatches;
+    }
+
+    /**
+     * Get the index of the currently active search match (-1 if none).
+     */
+    get searchActiveIndex(): number {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        return this.uiShell!.getState().searchActiveIndex;
+    }
+
+    /**
+     * Set the active search match by index. Navigates the viewport to the match.
+     *
+     * @param index - 0-based index into `searchMatches`
+     * @param options - Optional overrides for this navigation
+     * @param options.scrollAlignment - Override scroll alignment for this call only
+     */
+    setSearchActiveIndex(index: number, options?: { scrollAlignment?: ScrollAlignment }): void {
+        this.ensureNotDestroyed();
+        this.ensureUiMode();
+        this.uiShell!.dispatch({ type: "SET_SEARCH_ACTIVE_INDEX", index, scrollAlignment: options?.scrollAlignment });
+    }
+
+    // ===========================================================================
+    // Page Rendering
+    // ===========================================================================
+
+    /**
+     * Render a page to an image.
+     *
+     * @param page - Page index (0-based)
+     * @param options - Render options (scale, format, etc.)
+     */
+    async renderPage(page: number, options: RenderOptions = {}): Promise<RenderedPage> {
+        return this.renderWithType(page, "page", options);
+    }
+
+    /**
+     * Render a thumbnail of a page.
+     *
+     * Similar to renderPage but uses lower priority in the render queue,
+     * making it suitable for generating thumbnails without blocking main page renders.
+     *
+     * @param page - Page index (0-based)
+     * @param options - Render options (scale, format, etc.)
+     */
+    async renderThumbnail(page: number, options: RenderOptions = {}): Promise<RenderedPage> {
+        return this.renderWithType(page, "thumbnail", options);
+    }
+
+    /**
+     * Render a rectangular sub-region of a page.
+     *
+     * The rect is expressed in **page points** (1 point = 1/72 inch), with the
+     * origin at the top-left of the page — the same coordinate space as
+     * `getPageInfo(page).width` / `.height`.
+     *
+     * Output pixel size is `rect.width * scale` × `rect.height * scale`.
+     *
+     * Internally this renders the full page at the requested scale (sharing the
+     * render cache with `renderPage`) and crops the result, so the underlying
+     * full-page render is bounded by the engine's max-render limits.
+     *
+     * @param page - Page index (0-based)
+     * @param rect - Region to render, in page points (top-left origin)
+     * @param options - Render options. `scale` controls resolution; `format`,
+     *   `imageType`, `quality`, `force`, and `boost` behave as in `renderPage`.
+     */
+    async renderRegion(
+        page: number,
+        rect: { x: number; y: number; width: number; height: number },
+        options: RenderOptions = {},
+    ): Promise<RenderedPage> {
+        this.ensureLoaded();
+
+        if (!(rect.width > 0) || !(rect.height > 0)) {
+            throw new Error("renderRegion: rect width and height must be positive");
+        }
+
+        const scale = options.scale ?? 1;
+        const format = options.format ?? "image-data";
+        const force = options.force ?? false;
+        const boost = options.boost ?? false;
+
+        const renderRequest = {
+            docId: this.documentId!,
+            page: page + 1,
+            type: "page" as RenderType,
+            scale,
+        };
+
+        let result;
+        if (force) {
+            result = await this.workerClient.forceRender(renderRequest);
+        } else {
+            if (boost) {
+                this.workerClient.boostPageRenderPriority(this.documentId!, page + 1);
+            }
+            result = await this.workerClient.requestRender(renderRequest);
+        }
+
+        const fullBitmap = result.bitmap;
+
+        let sx = Math.round(rect.x * scale);
+        let sy = Math.round(rect.y * scale);
+        let sw = Math.round(rect.width * scale);
+        let sh = Math.round(rect.height * scale);
+
+        // Clamp to the rendered bitmap so a rect that spills past the page edge
+        // returns the visible portion instead of failing.
+        if (sx < 0) {
+            sw += sx;
+            sx = 0;
+        }
+        if (sy < 0) {
+            sh += sy;
+            sy = 0;
+        }
+        sw = Math.min(sw, fullBitmap.width - sx);
+        sh = Math.min(sh, fullBitmap.height - sy);
+
+        if (sw <= 0 || sh <= 0) {
+            throw new Error("renderRegion: rect is outside the page bounds");
+        }
+
+        const regionBitmap = await createImageBitmap(fullBitmap, sx, sy, sw, sh);
+        return this.convertBitmapToFormat(regionBitmap, format, options);
+    }
+
+    /**
+     * Internal method to render a page with a specific render type.
+     */
+    private async renderWithType(page: number, type: RenderType, options: RenderOptions = {}): Promise<RenderedPage> {
+        this.ensureLoaded();
+
+        const scale = options.scale ?? 1;
+        const format = options.format ?? "image-data";
+        const force = options.force ?? false;
+        const boost = options.boost ?? false;
+
+        const renderRequest = {
+            docId: this.documentId!,
+            page: page + 1, // Uses 1-based page numbers
+            type,
+            scale,
+        };
+
+        let result;
+        if (force) {
+            // Bypass cache and queue, call worker directly
+            result = await this.workerClient.forceRender(renderRequest);
+        } else {
+            // Boost priority if requested (before queueing the render)
+            if (boost) {
+                if (type === "page") {
+                    this.workerClient.boostPageRenderPriority(this.documentId!, page + 1);
+                } else {
+                    this.workerClient.boostThumbnailRenderPriority(this.documentId!, page + 1);
+                }
+            }
+
+            // Request render through WorkerClient
+            // Performance tracking is handled by WorkerClient.doRender()
+            result = await this.workerClient.requestRender(renderRequest);
+        }
+
+        // Convert ImageBitmap to the requested format
+        return this.convertBitmapToFormat(result.bitmap, format, options);
+    }
+
+    /**
+     * Convert an ImageBitmap to the requested output format.
+     */
+    private async convertBitmapToFormat(
+        bitmap: ImageBitmap,
+        format: "image-data" | "image-bitmap" | "blob" | "data-url",
+        options: RenderOptions,
+    ): Promise<RenderedPage> {
+        if (format === "image-bitmap") {
+            return bitmap;
+        }
+
+        const canvas = document.createElement("canvas");
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const ctx = canvas.getContext("2d")!;
+        ctx.drawImage(bitmap, 0, 0);
+
+        if (format === "image-data") {
+            return ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+        }
+
+        const imageType = options.imageType ?? "image/png";
+        const quality = options.quality ?? 0.92;
+
+        if (format === "blob") {
+            return new Promise<Blob>((resolve, reject) => {
+                canvas.toBlob(
+                    (blob: Blob | null) => {
+                        if (blob) resolve(blob);
+                        else reject(new Error("Failed to create blob"));
+                    },
+                    imageType,
+                    quality,
+                );
+            });
+        }
+
+        // data-url
+        return canvas.toDataURL(imageType, quality);
+    }
+
+    // ===========================================================================
+    // Export
+    // ===========================================================================
+
+    /**
+     * Export document as bytes.
+     * If annotations have been edited, saves them into the PDF before returning.
+     */
+    async toBytes(): Promise<Uint8Array> {
+        this.ensureLoaded();
+
+        // If there are dirty annotation pages, save them into the PDF first.
+        // Ephemeral annotations are excluded — they're viewer-only and never persist.
+        const state = this.uiShell?.store.getState();
+        if (state && state.annotationsDirtyPages.size > 0 && this.currentFormat === "pdf") {
+            const annotationsByPage: AnnotationsByPage = {};
+            for (const [pageIndex, annotations] of state.pageAnnotations) {
+                const persistable = annotations.filter((a) => !a.ephemeral);
+                annotationsByPage[String(pageIndex)] = persistable as AnnotationsByPage[string];
+            }
+            return this.workerClient.pdfSaveAnnotations(this.documentId!, annotationsByPage);
+        }
+
+        return this.workerClient.getBytes(this.documentId!);
+    }
+
+    /**
+     * Download document to user's device.
+     * @param filename - Filename for download (defaults to original source filename)
+     */
+    async download(filename?: string): Promise<void> {
+        const bytes = await this.toBytes();
+        const mimeType = this.getMimeType();
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+
+        const resolvedFilename = filename ?? this.getDefaultFilename();
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = resolvedFilename;
+        a.click();
+
+        URL.revokeObjectURL(url);
+        this.emit("download", { filename: resolvedFilename });
+    }
+
+    /**
+     * Print the document.
+     * Shows the print dialog when called without options (from public API).
+     * When called with options (from the dialog), renders selected pages and opens the browser print dialog.
+     */
+    async print(options?: PrintDialogResult): Promise<void> {
+        this.ensureLoaded();
+
+        // If no options provided, show the print dialog
+        if (!options) {
+            this.uiShell?.dispatch({ type: "SHOW_PRINT_DIALOG" });
+            return;
+        }
+
+        const pageIndices = this.resolvePageIndices(options.pageRange);
+        const isAllPages = pageIndices.length === this._pageCount;
+
+        this.emit("print", { pageCount: pageIndices.length });
+
+        // For PDF with all pages and standard quality, use native PDF printing (vector quality)
+        if (this.currentFormat === "pdf" && isAllPages && options.quality === "standard") {
+            await this.printPdfNative();
+        } else {
+            await this.printRendered(pageIndices, options.quality);
+        }
+    }
+
+    /**
+     * Resolve a PrintPageRange into an array of 0-based page indices.
+     * @internal
+     */
+    private resolvePageIndices(range: PrintPageRange): number[] {
+        switch (range.kind) {
+            case "all":
+                return Array.from({ length: this._pageCount }, (_, i) => i);
+            case "current":
+                return [this.currentPage - 1];
+            case "fromTo": {
+                const indices: number[] = [];
+                for (let i = range.from - 1; i < range.to; i++) indices.push(i);
+                return indices;
+            }
+            case "custom":
+                return range.pages.map((p) => p - 1);
+        }
+    }
+
+    /**
+     * Print PDF by loading original bytes into an iframe — vector quality, no rendering needed.
+     * @internal
+     */
+    private async printPdfNative(): Promise<void> {
+        const bytes = await this.toBytes();
+        const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
+        const blobUrl = URL.createObjectURL(blob);
+
+        const title = this.getDefaultFilename().replace(/\.[^.]+$/, "");
+
+        const iframe = document.createElement("iframe");
+        iframe.style.position = "fixed";
+        iframe.style.left = "-9999px";
+        iframe.style.top = "-9999px";
+        iframe.style.width = "0";
+        iframe.style.height = "0";
+        document.body.appendChild(iframe);
+
+        iframe.src = blobUrl;
+
+        // Wait for the PDF to load in the iframe
+        await new Promise<void>((resolve) => {
+            iframe.onload = () => resolve();
+        });
+
+        const originalTitle = document.title;
+        document.title = title;
+
+        iframe.contentWindow?.print();
+
+        setTimeout(() => {
+            document.title = originalTitle;
+            URL.revokeObjectURL(blobUrl);
+            iframe.remove();
+        }, 1000);
+    }
+
+    /** Map quality preset to DPI scale factor. */
+    private static qualityToDpiScale(quality: PrintQuality): number {
+        switch (quality) {
+            case "draft":
+                return 150 / 72;
+            case "standard":
+                return 300 / 72;
+            case "high":
+                return 600 / 72;
+        }
+    }
+
+    /**
+     * Print by rendering selected pages to images.
+     * @internal
+     */
+    private async printRendered(pageIndices: number[], quality: PrintQuality): Promise<void> {
+        const totalPages = pageIndices.length;
+        // Show progress via store-driven loading overlay
+        this.uiShell?.dispatch({ type: "SET_PRINT_PROGRESS", currentPage: 0, totalPages });
+        const blobUrls: string[] = [];
+
+        try {
+            const scale = AniccaViewer.qualityToDpiScale(quality);
+
+            for (let idx = 0; idx < totalPages; idx++) {
+                const pageIndex = pageIndices[idx];
+                this.uiShell?.dispatch({ type: "SET_PRINT_PROGRESS", currentPage: idx + 1, totalPages });
+                const blob = await this.renderPage(pageIndex, {
+                    scale,
+                    format: "blob",
+                    force: true,
+                });
+                blobUrls.push(URL.createObjectURL(blob as Blob));
+            }
+
+            const firstInfo = this._pageInfo[pageIndices[0]];
+            const pageWidthIn = (firstInfo.width / 72).toFixed(4);
+            const pageHeightIn = (firstInfo.height / 72).toFixed(4);
+
+            let pagesHtml = "";
+            for (let idx = 0; idx < totalPages; idx++) {
+                const pageIndex = pageIndices[idx];
+                const info = this._pageInfo[pageIndex];
+                const widthIn = (info.width / 72).toFixed(4);
+                const heightIn = (info.height / 72).toFixed(4);
+                // Render annotations at scale=1 (1 PDF point = 1px). The page container
+                // is sized in inches (1in = 96 CSS px), so we scale by 96/72 to convert
+                // PDF points to CSS pixels.
+                const state = this.uiShell?.store.getState();
+                // Exclude ephemeral annotations from print output — they're
+                // viewer-only overlays.
+                const pageAnnotations = state?.pageAnnotations.get(pageIndex)?.filter((a) => !a.ephemeral);
+                let annotationLayer = "";
+                if (pageAnnotations && pageAnnotations.length > 0) {
+                    const tempLayer = document.createElement("div");
+                    renderAnnotationsToLayer(tempLayer, pageAnnotations, 1);
+                    const ptToCss = 96 / 72; // 1.333...
+                    annotationLayer =
+                        `<div style="position:absolute;top:0;left:0;width:${info.width}px;height:${info.height}px;` +
+                        `transform-origin:top left;transform:scale(${ptToCss});` +
+                        `pointer-events:none;">${tempLayer.innerHTML}</div>`;
+                }
+                pagesHtml +=
+                    `<div class="page" style="position:relative;width:${widthIn}in;height:${heightIn}in;">` +
+                    `<img src="${blobUrls[idx]}" style="width:100%;height:100%;">` +
+                    annotationLayer +
+                    `</div>`;
+            }
+
+            const title = this.getDefaultFilename().replace(/\.[^.]+$/, "");
+
+            const html = `<!DOCTYPE html>
+<html><head><title>${title}</title><style>
+@page { size: ${pageWidthIn}in ${pageHeightIn}in; margin: 0; }
+* { margin: 0; padding: 0; }
+.page { page-break-after: always; overflow: hidden; }
+.page:last-child { page-break-after: auto; }
+img { display: block; }
+</style></head><body>${pagesHtml}</body></html>`;
+
+            const iframe = document.createElement("iframe");
+            iframe.style.position = "fixed";
+            iframe.style.left = "-9999px";
+            iframe.style.top = "-9999px";
+            iframe.style.width = "0";
+            iframe.style.height = "0";
+            document.body.appendChild(iframe);
+
+            const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
+            if (!iframeDoc) {
+                iframe.remove();
+                throw new Error("Failed to create print iframe");
+            }
+
+            iframeDoc.open();
+            iframeDoc.write(html);
+            iframeDoc.close();
+
+            const images = iframeDoc.querySelectorAll("img");
+            await Promise.all(
+                Array.from(images).map(
+                    (img) =>
+                        new Promise<void>((resolve) => {
+                            if (img.complete) {
+                                resolve();
+                            } else {
+                                img.onload = () => resolve();
+                                img.onerror = () => resolve();
+                            }
+                        }),
+                ),
+            );
+
+            this.uiShell?.dispatch({ type: "CLEAR_PRINT_PROGRESS" });
+
+            const originalTitle = document.title;
+            document.title = title;
+
+            iframe.contentWindow?.print();
+
+            setTimeout(() => {
+                document.title = originalTitle;
+                for (const url of blobUrls) URL.revokeObjectURL(url);
+                iframe.remove();
+            }, 1000);
+        } catch (error) {
+            this.uiShell?.dispatch({ type: "CLEAR_PRINT_PROGRESS" });
+            for (const url of blobUrls) URL.revokeObjectURL(url);
+            throw error;
+        }
+    }
+
+    /** Returns the MIME type for the current document format. */
+    private getMimeType(): string {
+        switch (this.currentFormat) {
+            case "docx":
+                return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+            case "pptx":
+                return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+            case "xlsx":
+                return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+            case "image":
+                return "application/octet-stream";
+            case "pdf":
+            default:
+                return "application/pdf";
+        }
+    }
+
+    /** Returns a default filename based on the source or format. */
+    private getDefaultFilename(): string {
+        if (this.sourceFilename) {
+            // Extract filename from URL or File.name
+            try {
+                const url = new URL(this.sourceFilename);
+                const path = url.pathname;
+                const name = path.substring(path.lastIndexOf("/") + 1);
+                if (name) return decodeURIComponent(name);
+            } catch {
+                // Not a full URL (e.g. relative path or File.name) — extract filename
+                const lastSlash = this.sourceFilename.lastIndexOf("/");
+                return lastSlash >= 0 ? this.sourceFilename.substring(lastSlash + 1) : this.sourceFilename;
+            }
+        }
+        // Fallback based on format
+        switch (this.currentFormat) {
+            case "docx":
+                return "document.docx";
+            case "pptx":
+                return "document.pptx";
+            case "xlsx":
+                return "document.xlsx";
+            case "image":
+                return "image.png";
+            case "pdf":
+            default:
+                return "document.pdf";
+        }
+    }
+
+    // ===========================================================================
+    // Events
+    // ===========================================================================
+
+    /**
+     * Subscribe to an event.
+     * @returns Unsubscribe function
+     */
+    on<K extends keyof ViewerEventMap>(event: K, handler: EventHandler<K>): () => void {
+        if (!this.eventHandlers.has(event)) {
+            this.eventHandlers.set(event, new Set());
+        }
+        this.eventHandlers.get(event)!.add(handler as EventHandler<keyof ViewerEventMap>);
+
+        return () => this.off(event, handler);
+    }
+
+    /**
+     * Unsubscribe from an event.
+     */
+    off<K extends keyof ViewerEventMap>(event: K, handler: EventHandler<K>): void {
+        this.eventHandlers.get(event)?.delete(handler as EventHandler<keyof ViewerEventMap>);
+    }
+
+    // ===========================================================================
+    // Lifecycle
+    // ===========================================================================
+
+    /**
+     * Destroy the viewer and release resources.
+     */
+    destroy(): void {
+        if (this.destroyed) return;
+
+        this.destroyed = true;
+        if (this.storeUnsub) {
+            this.storeUnsub();
+            this.storeUnsub = null;
+        }
+        if (this.actionUnsub) {
+            this.actionUnsub();
+            this.actionUnsub = null;
+        }
+        if (this.fontUsageUnsub) {
+            this.fontUsageUnsub();
+            this.fontUsageUnsub = null;
+        }
+        if (this.uiShell) {
+            this.uiShell.destroy();
+            this.uiShell = null;
+        }
+        this.close();
+        this.eventHandlers.clear();
+    }
+
+    // ===========================================================================
+    // Internal Helpers
+    // ===========================================================================
+
+    /**
+     * Get the document ID (for internal use).
+     * @internal
+     */
+    getDocumentId(): string | null {
+        return this.documentId;
+    }
+
+    /**
+     * Initialize the viewer with an already-loaded document ID.
+     * Used by AniccaClient.compose() to create viewers for composed documents.
+     * @internal
+     */
+    async initializeFromDocId(docId: string): Promise<void> {
+        this.ensureNotDestroyed();
+        if (this.documentId) {
+            this.close();
+        }
+
+        this.documentId = docId;
+
+        // Load all page info upfront (fast operation)
+        this._pageInfo = await this.workerClient.getAllPageInfo(docId);
+        this._pageCount = this._pageInfo.length;
+        const format = (await this.workerClient.getDocumentFormat(docId)) as DocumentFormat;
+        this.currentFormat = format;
+        const pageGroups = await this.workerClient.getPageGroups(docId);
+
+        if (this.uiShell) {
+            this.uiShell.dispatch({
+                type: "SET_DOC",
+                doc: { id: docId },
+                documentFormat: format,
+                pageCount: this._pageCount,
+                pageInfos: this._pageInfo,
+                pageGroups,
+            });
+        }
+
+        this.emit("document:load", { pageCount: this._pageCount });
+    }
+
+    private resolveContainer(container: string | HTMLElement): HTMLElement {
+        if (typeof container === "string") {
+            const element = document.querySelector(container);
+            if (!element) {
+                throw new Error(`Container not found: ${container}`);
+            }
+            return element as HTMLElement;
+        }
+        return container;
+    }
+
+    private async resolveSourceWithFilename(
+        source: string | File | Uint8Array,
+    ): Promise<{ bytes: Uint8Array; filename?: string }> {
+        if (source instanceof Uint8Array) {
+            return { bytes: source };
+        }
+
+        if (source instanceof File) {
+            const buffer = await source.arrayBuffer();
+            return { bytes: new Uint8Array(buffer), filename: source.name };
+        }
+
+        // URL string - use streaming to report progress
+        const bytes = await this.fetchWithProgress(source);
+        return { bytes, filename: source };
+    }
+
+    private async fetchWithProgress(url: string): Promise<Uint8Array> {
+        // Show progress bar immediately before sending the request
+        if (this.uiShell) {
+            this.uiShell.dispatch({
+                type: "SET_DOWNLOAD_PROGRESS",
+                loaded: 0,
+                total: 0,
+            });
+        }
+        this.emit("document:loading", { loaded: 0, total: 0, percent: null });
+
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch document: ${response.statusText}`);
+        }
+
+        const contentLength = response.headers.get("Content-Length");
+        const total = contentLength ? parseInt(contentLength, 10) : 0;
+
+        // If no body or no streaming support, fall back to simple approach
+        if (!response.body) {
+            const buffer = await response.arrayBuffer();
+            // Clear download progress from UI
+            if (this.uiShell) {
+                this.uiShell.dispatch({ type: "CLEAR_DOWNLOAD_PROGRESS" });
+            }
+            return new Uint8Array(buffer);
+        }
+
+        const reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let loaded = 0;
+
+        // Helper to report progress to both event listeners and UI shell
+        const reportProgress = (currentLoaded: number) => {
+            const progress = {
+                loaded: currentLoaded,
+                total,
+                percent: total > 0 ? Math.round((currentLoaded / total) * 100) : null,
+            };
+            this.emit("document:loading", progress);
+            // Dispatch to UI shell for the loading overlay
+            if (this.uiShell) {
+                this.uiShell.dispatch({
+                    type: "SET_DOWNLOAD_PROGRESS",
+                    loaded: currentLoaded,
+                    total,
+                });
+            }
+        };
+
+        // Report initial progress with known total (transitions from indeterminate to 0%)
+        reportProgress(0);
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            chunks.push(value);
+            loaded += value.length;
+            reportProgress(loaded);
+        }
+
+        // Clear download progress from UI
+        if (this.uiShell) {
+            this.uiShell.dispatch({ type: "CLEAR_DOWNLOAD_PROGRESS" });
+        }
+
+        // Combine chunks into single array
+        const result = new Uint8Array(loaded);
+        let offset = 0;
+        for (const chunk of chunks) {
+            result.set(chunk, offset);
+            offset += chunk.length;
+        }
+
+        return result;
+    }
+
+    private emit<K extends keyof ViewerEventMap>(event: K, payload: ViewerEventMap[K]): void {
+        const handlers = this.eventHandlers.get(event);
+        if (handlers) {
+            for (const handler of handlers) {
+                try {
+                    handler(payload);
+                } catch (error) {
+                    console.error(`Error in event handler for ${event}:`, error);
+                }
+            }
+        }
+    }
+
+    private createEngineAdapter() {
+        return {
+            getPageInfo: async (_doc: { id: string }, page: number): Promise<PageInfo> => {
+                const pageIndex = Math.max(0, page - 1);
+                return this._pageInfo[pageIndex] ?? { width: 0, height: 0 };
+            },
+            getOutline: async (doc: { id: string }): Promise<OutlineItem[]> => {
+                const raw = await this.workerClient.getOutline(doc.id);
+                return raw as OutlineItem[];
+            },
+            getPageAnnotations: async (doc: { id: string }, pageIndex: number): Promise<Annotation[]> => {
+                const raw = await this.workerClient.getPageAnnotations(doc.id, pageIndex);
+                return raw as Annotation[];
+            },
+            getLayoutPage: async (doc: { id: string }, pageIndex: number): Promise<LayoutPage> => {
+                return (await this.workerClient.getLayoutPage(doc.id, pageIndex)) as LayoutPage;
+            },
+            getVisibilityGroups: async (doc: { id: string }): Promise<VisibilityGroup[]> => {
+                const raw = await this.workerClient.getVisibilityGroups(doc.id);
+                return raw as VisibilityGroup[];
+            },
+            setVisibilityGroupVisible: async (
+                doc: { id: string },
+                groupId: string,
+                visible: boolean,
+            ): Promise<boolean> => {
+                return await this.workerClient.setVisibilityGroupVisible(doc.id, groupId, visible);
+            },
+        };
+    }
+
+    private ensureNotDestroyed(): void {
+        if (this.destroyed) {
+            throw new Error("AniccaViewer has been destroyed");
+        }
+    }
+
+    private ensureLoaded(): void {
+        this.ensureNotDestroyed();
+        if (!this.documentId) {
+            throw new Error("No document loaded");
+        }
+    }
+
+    private ensureUiMode(): void {
+        if (!this.uiShell) {
+            throw new Error("This method requires UI mode (container must be provided)");
+        }
+    }
+}

@@ -1,0 +1,175 @@
+import type { Store } from "../../framework/store";
+import { subscribeSelector, shallowEqual } from "../../framework/selectors";
+import type { ViewerState, VisibilityGroup } from "../state";
+import type { Action } from "../actions";
+import type { WorkerClient } from "../../../worker/index.js";
+import type { I18n } from "../i18n/index.js";
+import { ICON_VISIBILITY, ICON_VISIBILITY_OFF, ICON_LOCK } from "../icons";
+
+type LayersSlice = {
+    groups: VisibilityGroup[] | null;
+    loading: boolean;
+    docId: string | null;
+};
+
+function selectLayersSlice(state: ViewerState): LayersSlice {
+    return {
+        groups: state.visibilityGroups,
+        loading: state.visibilityGroupsLoading,
+        docId: state.doc?.id ?? null,
+    };
+}
+
+export function createLayersPanel() {
+    const el = document.createElement("div");
+    el.className = "adv-layers-panel";
+
+    let storeRef: Store<ViewerState, Action> | null = null;
+    let workerClientRef: WorkerClient | null = null;
+    let i18nRef: I18n | null = null;
+    let currentSlice: LayersSlice | null = null;
+    let destroyed = false;
+
+    let unsubRender: (() => void) | null = null;
+    const unsubEvents: Array<() => void> = [];
+
+    function renderGroups(groups: VisibilityGroup[]): void {
+        el.innerHTML = "";
+
+        if (groups.length === 0) {
+            const empty = document.createElement("div");
+            empty.className = "adv-panel-empty";
+            empty.textContent = i18nRef!.t("layers.empty");
+            el.appendChild(empty);
+            return;
+        }
+
+        for (const group of groups) {
+            const item = document.createElement("div");
+            item.className = "adv-layers-panel__item";
+            if (group.locked) {
+                item.classList.add("adv-layers-panel__item--locked");
+            }
+
+            const toggle = document.createElement("button");
+            toggle.className = "adv-layers-panel__toggle";
+            toggle.type = "button";
+            toggle.setAttribute("role", "switch");
+            toggle.setAttribute("aria-checked", String(group.visible));
+            const visLabel = i18nRef!.t("layers.visibility", { name: group.name });
+            toggle.setAttribute("aria-label", visLabel);
+            toggle.title = visLabel;
+            toggle.innerHTML = group.visible ? ICON_VISIBILITY : ICON_VISIBILITY_OFF;
+            toggle.classList.toggle("adv-layers-panel__toggle--hidden", !group.visible);
+            if (group.locked) {
+                toggle.disabled = true;
+            }
+
+            const label = document.createElement("span");
+            label.className = "adv-layers-panel__label";
+            label.textContent = group.name;
+            if (!group.visible) {
+                label.classList.add("adv-layers-panel__label--hidden");
+            }
+
+            if (!group.locked) {
+                const onClick = async () => {
+                    if (!storeRef || !workerClientRef) return;
+                    const state = storeRef.getState();
+                    if (!state.doc) return;
+
+                    const newVisible = !group.visible;
+                    const docId = state.doc.id;
+                    const client = workerClientRef;
+
+                    try {
+                        await client.setVisibilityGroupVisible(docId, group.id, newVisible);
+                    } catch {
+                        // Worker terminated mid-flight — ignore
+                        return;
+                    }
+                    if (destroyed || !storeRef) return;
+
+                    storeRef.dispatch({ type: "SET_VISIBILITY_GROUP_VISIBLE", groupId: group.id, visible: newVisible });
+                    client.invalidateRenderCache(docId, "page");
+                };
+                toggle.addEventListener("click", onClick);
+                unsubEvents.push(() => toggle.removeEventListener("click", onClick));
+
+                label.addEventListener("click", onClick);
+                unsubEvents.push(() => label.removeEventListener("click", onClick));
+            }
+
+            item.append(toggle, label);
+
+            if (group.locked) {
+                const lockIcon = document.createElement("span");
+                lockIcon.className = "adv-layers-panel__lock";
+                lockIcon.innerHTML = ICON_LOCK;
+                item.appendChild(lockIcon);
+            }
+
+            el.appendChild(item);
+        }
+    }
+
+    function showLoading(): void {
+        el.innerHTML = "";
+        const loading = document.createElement("div");
+        loading.className = "adv-layers-panel__loading";
+        loading.textContent = i18nRef!.t("layers.loading");
+        el.appendChild(loading);
+    }
+
+    function applyState(slice: LayersSlice): void {
+        const changed = !currentSlice || slice.groups !== currentSlice.groups || slice.loading !== currentSlice.loading;
+
+        if (changed) {
+            // Clear old event listeners when rebuilding
+            for (const off of unsubEvents) off();
+            unsubEvents.length = 0;
+
+            if (slice.loading) {
+                showLoading();
+            } else if (slice.groups === null) {
+                el.innerHTML = "";
+            } else {
+                renderGroups(slice.groups);
+            }
+        }
+
+        currentSlice = slice;
+    }
+
+    function mount(
+        container: HTMLElement,
+        store: Store<ViewerState, Action>,
+        workerClient: WorkerClient,
+        i18n: I18n,
+    ): void {
+        container.appendChild(el);
+        storeRef = store;
+        workerClientRef = workerClient;
+        i18nRef = i18n;
+
+        applyState(selectLayersSlice(store.getState()));
+        unsubRender = subscribeSelector(store, selectLayersSlice, applyState, { equality: shallowEqual });
+    }
+
+    function destroy(): void {
+        destroyed = true;
+        if (unsubRender) unsubRender();
+        for (const off of unsubEvents) off();
+        unsubEvents.length = 0;
+
+        storeRef = null;
+        workerClientRef = null;
+        currentSlice = null;
+
+        el.remove();
+    }
+
+    return { el, mount, destroy };
+}
+
+export type LayersPanelComponent = ReturnType<typeof createLayersPanel>;

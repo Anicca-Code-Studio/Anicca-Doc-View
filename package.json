@@ -1,0 +1,74 @@
+{
+    "name": "anicca-doc-view",
+    "version": "0.1.0",
+    "type": "module",
+    "license": "MIT",
+    "author": "Anicca Code Studio <aniccacodestudio@gmail.com>",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/anicca-code-studio/anicca-doc-view.git"
+    },
+    "homepage": "https://github.com/anicca-code-studio/anicca-doc-view#readme",
+    "description": "Universal document viewer for the web by Anicca Code Studio. Framework-agnostic viewer powered by a WebAssembly engine for high-fidelity rendering across PDF, DOCX, PPTX, XLSX, SVG, and images.",
+    "keywords": [
+        "viewer",
+        "pdf",
+        "pdf-viewer",
+        "docx",
+        "docx-viewer",
+        "pptx",
+        "pptx-viewer",
+        "xlsx",
+        "svg",
+        "svg-viewer",
+        "image",
+        "image-viewer",
+        "document",
+        "document-viewer",
+        "office",
+        "office-viewer",
+        "word",
+        "powerpoint",
+        "wasm",
+        "webassembly"
+    ],
+    "main": "dist/src/index.js",
+    "types": "dist/src/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/src/index.d.ts",
+            "import": "./dist/src/index.js"
+        },
+        "./worker": {
+            "types": "./dist/src/worker.d.ts",
+            "import": "./dist/src/worker.js"
+        }
+    },
+    "files": [
+        "dist"
+    ],
+    "sideEffects": false,
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "build": "node scripts/build-styles.js && tsc && node scripts/copy-wasm.js && node scripts/bundle-worker.js",
+        "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+        "dev": "tsc --watch",
+        "test": "vitest run",
+        "test:watch": "vitest",
+        "test:browser": "vitest run --config vitest.browser.config.ts",
+        "test:browser:watch": "vitest --config vitest.browser.config.ts",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "npm run build"
+    },
+    "devDependencies": {
+        "@vitest/browser": "^4.0.18",
+        "@vitest/browser-playwright": "^4.0.18",
+        "esbuild": "^0.25.0",
+        "playwright": "^1.49.0",
+        "typescript": "^5.7.2",
+        "vite": "^6.0.3",
+        "vitest": "^4.0.18"
+    }
+}

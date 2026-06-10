@@ -1,0 +1,350 @@
+import type { Store } from "../../framework/store";
+import { subscribeSelector } from "../../framework/selectors";
+import type { ViewerState, LeftPanelTab, PanelTab } from "../state";
+import { isLeftPanelTab, LEFT_PANEL_TABS } from "../state";
+import type { Action } from "../actions";
+import type { WorkerClient } from "../../../worker/index.js";
+import type { I18n } from "../i18n/index.js";
+import { ICON_THUMBNAIL, ICON_OUTLINE, ICON_BOOKMARK, ICON_LAYERS, ICON_ATTACHMENT, ICON_FONTS } from "../icons";
+import { createThumbnailPanel, type ThumbnailPanelComponent } from "./ThumbnailPanel";
+import { createOutlinePanel, type OutlinePanelComponent } from "./OutlinePanel";
+import { createBookmarksPanel, type BookmarksPanelComponent } from "./BookmarksPanel";
+import { createLayersPanel, type LayersPanelComponent } from "./LayersPanel";
+import { createAttachmentsPanel, type AttachmentsPanelComponent } from "./AttachmentsPanel";
+import { createFontsPanel, type FontsPanelComponent } from "./FontsPanel";
+
+interface TabConfig {
+    id: LeftPanelTab;
+    label: string;
+    icon: string;
+}
+
+const TAB_PRESENTATION: Record<LeftPanelTab, { label: string; icon: string }> = {
+    thumbnail: { label: "Thumbnails", icon: ICON_THUMBNAIL },
+    outline: { label: "Outline", icon: ICON_OUTLINE },
+    bookmarks: { label: "Bookmarks", icon: ICON_BOOKMARK },
+    layers: { label: "Layers", icon: ICON_LAYERS },
+    attachments: { label: "Attachments", icon: ICON_ATTACHMENT },
+    fonts: { label: "Fonts", icon: ICON_FONTS },
+};
+
+const TABS: TabConfig[] = LEFT_PANEL_TABS.map((id) => ({ id, ...TAB_PRESENTATION[id] }));
+
+type LeftPanelSlice = {
+    open: boolean;
+    activeTab: LeftPanelTab | null;
+    width: number | null;
+    panelVisible: boolean;
+    disabledPanels: ReadonlySet<PanelTab>;
+    allDisabled: boolean;
+    singleEnabledTab: boolean;
+    noTransition: boolean;
+};
+
+export function createLeftPanel() {
+    const el = document.createElement("div");
+    el.className = "adv-left-panel";
+
+    // Tab bar
+    const tabBar = document.createElement("div");
+    tabBar.className = "adv-left-panel__tabs";
+    tabBar.setAttribute("role", "tablist");
+    tabBar.setAttribute("aria-label", "Panel tabs");
+
+    const tabButtons = new Map<LeftPanelTab, HTMLButtonElement>();
+    for (const tab of TABS) {
+        const btn = document.createElement("button");
+        btn.className = "adv-left-panel__tab";
+        btn.id = `adv-left-tab-${tab.id}`;
+        btn.setAttribute("aria-label", tab.label);
+        btn.setAttribute("role", "tab");
+        btn.setAttribute("aria-selected", "false");
+        btn.setAttribute("aria-controls", "adv-left-panel-content");
+        btn.setAttribute("data-tab", tab.id);
+        btn.innerHTML = tab.icon;
+        tabButtons.set(tab.id, btn);
+        tabBar.appendChild(btn);
+    }
+
+    // Content area
+    const content = document.createElement("div");
+    content.className = "adv-left-panel__content";
+    content.id = "adv-left-panel-content";
+    content.setAttribute("role", "tabpanel");
+
+    // Resize handle
+    const resizeHandle = document.createElement("div");
+    resizeHandle.className = "adv-left-panel__resize-handle";
+    resizeHandle.setAttribute("role", "separator");
+    resizeHandle.setAttribute("aria-orientation", "vertical");
+    resizeHandle.setAttribute("aria-label", "Resize side panel");
+    resizeHandle.setAttribute("tabindex", "0");
+    resizeHandle.setAttribute("aria-valuenow", "280");
+    resizeHandle.setAttribute("aria-valuemin", "200");
+    resizeHandle.setAttribute("aria-valuemax", "500");
+
+    el.append(tabBar, content, resizeHandle);
+
+    let unsubRender: (() => void) | null = null;
+    let unsubContent: (() => void) | null = null;
+    const unsubEvents: Array<() => void> = [];
+
+    // Panel content components
+    let thumbnailPanel: ThumbnailPanelComponent | null = null;
+    let outlinePanel: OutlinePanelComponent | null = null;
+    let bookmarksPanel: BookmarksPanelComponent | null = null;
+    let layersPanel: LayersPanelComponent | null = null;
+    let attachmentsPanel: AttachmentsPanelComponent | null = null;
+    let fontsPanel: FontsPanelComponent | null = null;
+    let storeRef: Store<ViewerState, Action> | null = null;
+    let workerClientRef: WorkerClient | null = null;
+    let i18nRef: I18n | null = null;
+
+    function applyState(slice: LeftPanelSlice): void {
+        // Hide entire panel area if disabled or all left tabs are disabled
+        el.style.display = !slice.panelVisible || slice.allDisabled ? "none" : "";
+
+        // Suppress transition when loading a new document
+        el.style.transition = slice.noTransition ? "none" : "";
+
+        el.classList.toggle("adv-left-panel--closed", !slice.open);
+
+        // Hide the tab strip when there's only one tab to choose between
+        tabBar.style.display = slice.singleEnabledTab ? "none" : "";
+
+        // Apply width from state (only when open)
+        if (slice.open && slice.width !== null) {
+            el.style.width = `${slice.width}px`;
+        } else {
+            el.style.width = "";
+        }
+
+        for (const [tabId, btn] of tabButtons) {
+            const isActive = tabId === slice.activeTab;
+            btn.classList.toggle("adv-left-panel__tab--active", isActive);
+            btn.setAttribute("aria-selected", String(isActive));
+            // Hide individual tab buttons that are disabled
+            btn.style.display = slice.disabledPanels.has(tabId) ? "none" : "";
+        }
+
+        // Link tabpanel to active tab
+        if (slice.activeTab) {
+            content.setAttribute("aria-labelledby", `adv-left-tab-${slice.activeTab}`);
+        } else {
+            content.removeAttribute("aria-labelledby");
+        }
+    }
+
+    function applyContent(activeTab: LeftPanelTab | null): void {
+        // Destroy previous content
+        if (thumbnailPanel) {
+            thumbnailPanel.destroy();
+            thumbnailPanel = null;
+        }
+        if (outlinePanel) {
+            outlinePanel.destroy();
+            outlinePanel = null;
+        }
+        if (bookmarksPanel) {
+            bookmarksPanel.destroy();
+            bookmarksPanel = null;
+        }
+        if (layersPanel) {
+            layersPanel.destroy();
+            layersPanel = null;
+        }
+        if (attachmentsPanel) {
+            attachmentsPanel.destroy();
+            attachmentsPanel = null;
+        }
+        if (fontsPanel) {
+            fontsPanel.destroy();
+            fontsPanel = null;
+        }
+
+        // Mount new content based on active tab
+        if (activeTab === "thumbnail" && storeRef && workerClientRef) {
+            thumbnailPanel = createThumbnailPanel();
+            thumbnailPanel.mount(content, storeRef, workerClientRef, i18nRef!);
+        } else if (activeTab === "outline" && storeRef) {
+            outlinePanel = createOutlinePanel();
+            outlinePanel.mount(content, storeRef, i18nRef!);
+        } else if (activeTab === "bookmarks") {
+            bookmarksPanel = createBookmarksPanel();
+            bookmarksPanel.mount(content, i18nRef!);
+        } else if (activeTab === "layers" && storeRef && workerClientRef) {
+            layersPanel = createLayersPanel();
+            layersPanel.mount(content, storeRef, workerClientRef, i18nRef!);
+        } else if (activeTab === "attachments") {
+            attachmentsPanel = createAttachmentsPanel();
+            attachmentsPanel.mount(content, i18nRef!);
+        } else if (activeTab === "fonts" && storeRef && workerClientRef) {
+            fontsPanel = createFontsPanel();
+            fontsPanel.mount(content, storeRef, workerClientRef, i18nRef!);
+        }
+    }
+
+    function setupResize(): void {
+        let startX = 0;
+        let startWidth = 0;
+
+        const onPointerMove = (e: PointerEvent) => {
+            const delta = e.clientX - startX;
+            const newWidth = Math.max(200, Math.min(500, startWidth + delta));
+            el.style.width = `${newWidth}px`;
+        };
+
+        const onPointerUp = () => {
+            document.removeEventListener("pointermove", onPointerMove);
+            document.removeEventListener("pointerup", onPointerUp);
+            el.classList.remove("adv-left-panel--resizing");
+            document.body.style.cursor = "";
+            document.body.style.userSelect = "";
+
+            // Persist width to state
+            if (storeRef) {
+                const finalWidth = el.offsetWidth;
+                storeRef.dispatch({ type: "SET_LEFT_PANEL_WIDTH", width: finalWidth });
+            }
+        };
+
+        const onPointerDown = (e: PointerEvent) => {
+            e.preventDefault();
+            startX = e.clientX;
+            startWidth = el.offsetWidth;
+            el.classList.add("adv-left-panel--resizing");
+            document.body.style.cursor = "col-resize";
+            document.body.style.userSelect = "none";
+            document.addEventListener("pointermove", onPointerMove);
+            document.addEventListener("pointerup", onPointerUp);
+        };
+
+        resizeHandle.addEventListener("pointerdown", onPointerDown);
+        unsubEvents.push(() => resizeHandle.removeEventListener("pointerdown", onPointerDown));
+
+        // Keyboard resize: arrow keys
+        const RESIZE_STEP = 20;
+        const onKeyDown = (e: KeyboardEvent) => {
+            if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+            e.preventDefault();
+            const currentWidth = el.offsetWidth;
+            const delta = e.key === "ArrowRight" ? RESIZE_STEP : -RESIZE_STEP;
+            const newWidth = Math.max(200, Math.min(500, currentWidth + delta));
+            el.style.width = `${newWidth}px`;
+            resizeHandle.setAttribute("aria-valuenow", String(newWidth));
+            if (storeRef) {
+                storeRef.dispatch({ type: "SET_LEFT_PANEL_WIDTH", width: newWidth });
+            }
+        };
+        resizeHandle.addEventListener("keydown", onKeyDown);
+        unsubEvents.push(() => resizeHandle.removeEventListener("keydown", onKeyDown));
+    }
+
+    function mount(
+        container: HTMLElement,
+        store: Store<ViewerState, Action>,
+        workerClient: WorkerClient,
+        i18n: I18n,
+    ): void {
+        container.appendChild(el);
+        storeRef = store;
+        workerClientRef = workerClient;
+        i18nRef = i18n;
+
+        // Update i18n labels
+        tabBar.setAttribute("aria-label", i18n.t("leftPanel.tabs"));
+        resizeHandle.setAttribute("aria-label", i18n.t("leftPanel.resizeHandle"));
+
+        // Update tab labels with i18n
+        for (const [tabId, btn] of tabButtons) {
+            const labelKey = tabId === "thumbnail" ? "leftPanel.thumbnails" : `leftPanel.${tabId}`;
+            const label = i18n.t(labelKey);
+            btn.setAttribute("aria-label", label);
+            btn.title = label;
+        }
+
+        // Tab click handlers
+        for (const [tabId, btn] of tabButtons) {
+            const onClick = () => {
+                store.dispatch({ type: "TOGGLE_PANEL", panel: tabId });
+            };
+            btn.addEventListener("click", onClick);
+            unsubEvents.push(() => btn.removeEventListener("click", onClick));
+        }
+
+        // Setup resize handle
+        setupResize();
+
+        // Subscribe to state changes for panel open/close
+        const initialSlice = selectLeftPanel(store.getState());
+        applyState(initialSlice);
+        unsubRender = subscribeSelector(store, selectLeftPanel, applyState, {
+            equality: (a, b) =>
+                a.open === b.open &&
+                a.activeTab === b.activeTab &&
+                a.width === b.width &&
+                a.panelVisible === b.panelVisible &&
+                a.disabledPanels === b.disabledPanels &&
+                a.allDisabled === b.allDisabled &&
+                a.singleEnabledTab === b.singleEnabledTab &&
+                a.noTransition === b.noTransition,
+        });
+
+        // Subscribe to active tab changes for content
+        applyContent(initialSlice.activeTab);
+        unsubContent = subscribeSelector(store, (state) => selectLeftPanel(state).activeTab, applyContent);
+    }
+
+    function destroy(): void {
+        if (unsubRender) unsubRender();
+        if (unsubContent) unsubContent();
+        for (const off of unsubEvents) off();
+
+        if (thumbnailPanel) {
+            thumbnailPanel.destroy();
+            thumbnailPanel = null;
+        }
+        if (outlinePanel) {
+            outlinePanel.destroy();
+            outlinePanel = null;
+        }
+        if (bookmarksPanel) {
+            bookmarksPanel.destroy();
+            bookmarksPanel = null;
+        }
+        if (layersPanel) {
+            layersPanel.destroy();
+            layersPanel = null;
+        }
+        if (attachmentsPanel) {
+            attachmentsPanel.destroy();
+            attachmentsPanel = null;
+        }
+        if (fontsPanel) {
+            fontsPanel.destroy();
+            fontsPanel = null;
+        }
+
+        storeRef = null;
+        workerClientRef = null;
+        el.remove();
+    }
+
+    return { el, mount, destroy };
+}
+
+function selectLeftPanel(state: ViewerState): LeftPanelSlice {
+    const panel = state.activePanel;
+    const isLeftTab = panel !== null && isLeftPanelTab(panel);
+    const enabledCount = TABS.reduce((n, tab) => (state.disabledPanels.has(tab.id) ? n : n + 1), 0);
+    return {
+        open: isLeftTab,
+        activeTab: isLeftTab ? panel : null,
+        width: state.leftPanelWidth,
+        panelVisible: state.leftPanelVisible,
+        disabledPanels: state.disabledPanels,
+        allDisabled: enabledCount === 0,
+        singleEnabledTab: enabledCount === 1,
+        noTransition: state.panelTransitionsDisabled,
+    };
+}

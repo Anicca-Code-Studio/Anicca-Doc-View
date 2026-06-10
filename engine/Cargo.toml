@@ -1,0 +1,32 @@
+[package]
+name = "anicca-engine"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Anicca Doc View rendering engine (WASM). Copyright (c) 2026 Anicca Code Studio."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "=0.2.100"
+js-sys = "0.3.77"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+# DOCX container + XML
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+
+# Text shaping, layout, rasterization
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+ttf-parser = "0.25"
+
+# Ensure wasm RNG backend resolves when pulled transitively
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
