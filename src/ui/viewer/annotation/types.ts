@@ -1,0 +1,370 @@
+/**
+ * Annotation type definitions.
+ *
+ * Uses discriminated union types for type-safe annotation handling.
+ */
+
+// =============================================================================
+// Common Types
+// =============================================================================
+
+/**
+ * Coordinate convention used by every annotation geometry field in this file
+ * (`Rect`, `Point`, `Quad`, and the per-type vertex/path arrays):
+ *
+ * - **Origin:** top-left corner of the page's **unrotated MediaBox** — i.e.
+ *   the page in its natural orientation, *before* any `/Rotate` is applied.
+ *   `(0, 0)` is the MediaBox top-left even when the page is displayed
+ *   rotated 90°, 180°, or 270°.
+ * - **Units:** PDF points (1/72 inch).
+ * - **Axes:** `+x` to the right, `+y` downward (Y-flipped from PDF's native
+ *   bottom-up `/Rect`; the engine converts on load/save).
+ * - **Rotation:** the viewer applies `/Rotate` (combined with the user's
+ *   rotation toggle) as a display transform — callers should never
+ *   pre-rotate bounds. A horizontal line at any rotation is still a line
+ *   with `start.y === end.y` in this coordinate space.
+ * - **CropBox:** ignored. We render the full MediaBox and address overlays
+ *   in MediaBox coords, so annotations stay aligned even on PDFs whose
+ *   CropBox trims the visible area.
+ *
+ * The same convention is used by the worker (`getPageAnnotations`),
+ * `AniccaViewer.addPageAnnotation(s)` / `updatePageAnnotation(s)`, and the
+ * Rust engine's `pdf_save_annotations`.
+ */
+
+/** Rectangle in unrotated MediaBox coordinates (points, origin top-left). */
+export interface Rect {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+}
+
+/** Point in unrotated MediaBox coordinates (points, origin top-left). */
+export interface Point {
+    x: number;
+    y: number;
+}
+
+/**
+ * Quadrilateral defined by 4 corner points in unrotated MediaBox coordinates.
+ * Points are ordered: [bottom-left, bottom-right, top-right, top-left]
+ * (where "bottom"/"top" refer to the *unrotated* page, not the displayed
+ * orientation).
+ */
+export interface Quad {
+    points: [Point, Point, Point, Point];
+}
+
+/** RGB color with components in range 0.0-1.0. */
+export interface AnnotationColor {
+    r: number;
+    g: number;
+    b: number;
+}
+
+/**
+ * Metadata for markup annotations (author, subject, contents, state).
+ * Displayed in annotation popups and comment threads.
+ */
+export interface MarkupMetadata {
+    author?: string;
+    subject?: string;
+    contents?: string;
+    state?: string;
+    stateModel?: string;
+}
+
+// =============================================================================
+// Base Annotation
+// =============================================================================
+
+/** Base annotation properties shared by all annotation types. */
+interface BaseAnnotation {
+    /** Bounding rectangle in unrotated MediaBox coordinates (see {@link Rect}). */
+    bounds: Rect;
+    /** Reply annotations nested under this annotation. */
+    replies?: Annotation[];
+    /** Metadata for markup annotations. */
+    metadata?: MarkupMetadata;
+    /**
+     * Unique annotation identifier (PDF NM entry). Stable across edits and
+     * round-trips through save. Use this as the key when looking up an
+     * annotation across calls to `getPageAnnotations`.
+     *
+     * For annotations created via `AniccaViewer.addPageAnnotation` without an
+     * explicit name, the viewer assigns a UUID before insertion.
+     */
+    name?: string;
+    /**
+     * Last modification date (PDF M entry), in PDF date format
+     * (e.g. "D:20260506120000Z"). Updated automatically on save.
+     */
+    modificationDate?: string;
+    /**
+     * Marks this annotation as ephemeral. Ephemeral annotations:
+     * - render in the viewer like any other annotation,
+     * - are NOT written to the PDF when saving (`toBytes` / `download`),
+     * - are NOT included in print output.
+     *
+     * The UI drawing/markup tools never set this flag — it is API-only.
+     * Use `addPageAnnotation({ ..., ephemeral: true })` to create one and
+     * `updatePageAnnotation` to flip the flag (e.g. promote an ephemeral
+     * preview shape into a real annotation that gets saved).
+     */
+    ephemeral?: boolean;
+}
+
+// =============================================================================
+// Link Annotation
+// =============================================================================
+
+/** Destination within a document. */
+export interface Destination {
+    pageIndex: number;
+    display: DestinationDisplay;
+}
+
+export type DestinationDisplay =
+    | { type: "xyz"; left?: number; top?: number; zoom?: number }
+    | { type: "fit" }
+    | { type: "fitH"; top?: number }
+    | { type: "fitV"; left?: number }
+    | { type: "fitR"; left: number; top: number; right: number; bottom: number }
+    | { type: "fitB" }
+    | { type: "fitBH"; top?: number }
+    | { type: "fitBV"; left?: number };
+
+/** Link action type. */
+export type LinkAction = { actionType: "goTo"; destination: Destination } | { actionType: "uri"; uri: string };
+
+/** Link annotation that navigates to a destination or opens a URI. */
+export interface LinkAnnotation extends BaseAnnotation {
+    type: "link";
+    action: LinkAction;
+}
+
+// =============================================================================
+// Markup Annotations (Text Highlighting)
+// =============================================================================
+
+/** Highlight annotation. */
+export interface HighlightAnnotation extends BaseAnnotation {
+    type: "highlight";
+    quads: Quad[];
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+/** Underline annotation. */
+export interface UnderlineAnnotation extends BaseAnnotation {
+    type: "underline";
+    quads: Quad[];
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+/** Strikeout annotation. */
+export interface StrikeOutAnnotation extends BaseAnnotation {
+    type: "strikeOut";
+    quads: Quad[];
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+/** Squiggly underline annotation. */
+export interface SquigglyAnnotation extends BaseAnnotation {
+    type: "squiggly";
+    quads: Quad[];
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+// =============================================================================
+// Text Annotations
+// =============================================================================
+
+/** Icon type for text (sticky note) annotations. */
+export type TextAnnotationIcon = "Comment" | "Key" | "Note" | "Help" | "NewParagraph" | "Paragraph" | "Insert";
+
+/** Text justification. */
+export type TextJustification = "left" | "center" | "right";
+
+/** Text (sticky note) annotation. */
+export interface TextAnnotation extends BaseAnnotation {
+    type: "text";
+    icon?: TextAnnotationIcon;
+    open?: boolean;
+    contents?: string;
+    color?: AnnotationColor;
+}
+
+/** Free text (typewriter/text box) annotation. */
+export interface FreeTextAnnotation extends BaseAnnotation {
+    type: "freeText";
+    contents?: string;
+    justification?: TextJustification;
+    defaultAppearance?: string;
+    color?: AnnotationColor;
+    borderColor?: AnnotationColor;
+    calloutLine?: Point[];
+}
+
+/** Stamp annotation. */
+export interface StampAnnotation extends BaseAnnotation {
+    type: "stamp";
+    name?: string;
+    hasCustomAppearance?: boolean;
+    color?: AnnotationColor;
+}
+
+/** Symbol type for caret annotations. */
+export type CaretSymbol = "None" | "P";
+
+/** Caret (text insertion point) annotation. */
+export interface CaretAnnotation extends BaseAnnotation {
+    type: "caret";
+    symbol?: CaretSymbol;
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+// =============================================================================
+// Shape Annotations
+// =============================================================================
+
+/** Line ending style. */
+export type LineEnding =
+    | "None"
+    | "Square"
+    | "Circle"
+    | "Diamond"
+    | "OpenArrow"
+    | "ClosedArrow"
+    | "Butt"
+    | "ROpenArrow"
+    | "RClosedArrow"
+    | "Slash";
+
+/** Border style. */
+export type BorderStyle = "solid" | "dashed" | "dotted" | "beveled" | "inset" | "underline";
+
+/** Line annotation. */
+export interface LineAnnotation extends BaseAnnotation {
+    type: "line";
+    start: Point;
+    end: Point;
+    startEnding?: LineEnding;
+    endEnding?: LineEnding;
+    color?: AnnotationColor;
+    interiorColor?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    opacity?: number;
+}
+
+/** Square/rectangle annotation. */
+export interface SquareAnnotation extends BaseAnnotation {
+    type: "square";
+    color?: AnnotationColor;
+    interiorColor?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    opacity?: number;
+}
+
+/** Circle/ellipse annotation. */
+export interface CircleAnnotation extends BaseAnnotation {
+    type: "circle";
+    color?: AnnotationColor;
+    interiorColor?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    opacity?: number;
+}
+
+/** Polygon annotation (closed shape). */
+export interface PolygonAnnotation extends BaseAnnotation {
+    type: "polygon";
+    vertices: Point[];
+    color?: AnnotationColor;
+    interiorColor?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    startEnding?: LineEnding;
+    endEnding?: LineEnding;
+    opacity?: number;
+}
+
+/** Polyline annotation (open path). */
+export interface PolyLineAnnotation extends BaseAnnotation {
+    type: "polyLine";
+    vertices: Point[];
+    color?: AnnotationColor;
+    interiorColor?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    startEnding?: LineEnding;
+    endEnding?: LineEnding;
+    opacity?: number;
+}
+
+/** Ink (freehand drawing) annotation. */
+export interface InkAnnotation extends BaseAnnotation {
+    type: "ink";
+    inkList: Point[][];
+    color?: AnnotationColor;
+    borderWidth?: number;
+    borderStyle?: BorderStyle;
+    opacity?: number;
+}
+
+/** Redact annotation (marks content for removal). */
+export interface RedactAnnotation extends BaseAnnotation {
+    type: "redact";
+    quads?: Quad[];
+    interiorColor?: AnnotationColor;
+    overlayText?: string;
+    justification?: TextJustification;
+    repeat?: boolean;
+    color?: AnnotationColor;
+    opacity?: number;
+}
+
+// =============================================================================
+// Union Type
+// =============================================================================
+
+/** All supported annotation types. */
+export type Annotation =
+    | LinkAnnotation
+    | HighlightAnnotation
+    | UnderlineAnnotation
+    | StrikeOutAnnotation
+    | SquigglyAnnotation
+    | TextAnnotation
+    | FreeTextAnnotation
+    | StampAnnotation
+    | CaretAnnotation
+    | LineAnnotation
+    | SquareAnnotation
+    | CircleAnnotation
+    | PolygonAnnotation
+    | PolyLineAnnotation
+    | InkAnnotation
+    | RedactAnnotation;
+
+/** Annotation type string. */
+export type AnnotationType = Annotation["type"];
+
+/**
+ * Partial annotation used by `patchPageAnnotation` / `patchPageAnnotations`.
+ *
+ * Only the listed fields are updated; everything else (including `type`,
+ * `name`, and any field not present in the patch) is preserved. `metadata`
+ * is shallow-merged one level deep, so patching `{ metadata: { contents } }`
+ * keeps the existing `author` / `subject`. `undefined` values are skipped,
+ * not treated as "clear this field" — use `updatePageAnnotation` for full
+ * replacement when you need to clear fields by omission.
+ */
+export type AnnotationPatch = Partial<Omit<Annotation, "type" | "name">>;

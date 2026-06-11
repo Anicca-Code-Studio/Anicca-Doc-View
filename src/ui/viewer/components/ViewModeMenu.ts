@@ -1,0 +1,332 @@
+import type { Store } from "../../framework/store";
+import { subscribeSelector } from "../../framework/selectors";
+import { on } from "../../framework/events";
+import type { ViewerState, ViewMode, ScrollMode, LayoutMode, PageRotation, SpacingMode } from "../state";
+import type { Action } from "../actions";
+import type { I18n } from "../i18n/index.js";
+import {
+    ICON_VIEW_MODE,
+    ICON_VIEW_PAGED,
+    ICON_VIEW_CONTINUOUS,
+    ICON_SCROLL_SPREAD,
+    ICON_SCROLL_CONTINUOUS,
+    ICON_LAYOUT_SINGLE,
+    ICON_LAYOUT_DOUBLE,
+    ICON_LAYOUT_DOUBLE_ODD_RIGHT,
+    ICON_LAYOUT_DOUBLE_ODD_LEFT,
+    ICON_ROTATE_0,
+    ICON_ROTATE_90,
+    ICON_ROTATE_180,
+    ICON_ROTATE_270,
+    ICON_SPACING_ALL,
+    ICON_SPACING_NONE,
+    ICON_SPACING_SPREAD,
+    ICON_SPACING_PAGE,
+} from "../icons";
+
+interface ViewModeSlice {
+    viewMode: ViewMode;
+    scrollMode: ScrollMode;
+    layoutMode: LayoutMode;
+    pageRotation: PageRotation;
+    spacingMode: SpacingMode;
+}
+
+function sliceEqual(a: ViewModeSlice, b: ViewModeSlice): boolean {
+    return (
+        a.viewMode === b.viewMode &&
+        a.scrollMode === b.scrollMode &&
+        a.layoutMode === b.layoutMode &&
+        a.pageRotation === b.pageRotation &&
+        a.spacingMode === b.spacingMode
+    );
+}
+
+interface MenuOption<T> {
+    value: T;
+    icon: string;
+    label: string;
+}
+
+const VIEW_MODE_OPTIONS: MenuOption<ViewMode>[] = [
+    { value: "paged", icon: ICON_VIEW_PAGED, label: "viewMode.paged" },
+    { value: "continuous", icon: ICON_VIEW_CONTINUOUS, label: "viewMode.continuousView" },
+];
+
+const SCROLL_OPTIONS: MenuOption<ScrollMode>[] = [
+    { value: "spread", icon: ICON_SCROLL_SPREAD, label: "viewMode.spread" },
+    { value: "continuous", icon: ICON_SCROLL_CONTINUOUS, label: "viewMode.continuous" },
+];
+
+const LAYOUT_OPTIONS: MenuOption<LayoutMode>[] = [
+    { value: "single-page", icon: ICON_LAYOUT_SINGLE, label: "viewMode.single" },
+    { value: "double-page", icon: ICON_LAYOUT_DOUBLE, label: "viewMode.double" },
+    { value: "double-page-odd-right", icon: ICON_LAYOUT_DOUBLE_ODD_RIGHT, label: "viewMode.coverRight" },
+    { value: "double-page-odd-left", icon: ICON_LAYOUT_DOUBLE_ODD_LEFT, label: "viewMode.coverLeft" },
+];
+
+const ROTATION_OPTIONS: MenuOption<PageRotation>[] = [
+    { value: 0, icon: ICON_ROTATE_0, label: "0°" },
+    { value: 90, icon: ICON_ROTATE_90, label: "90°" },
+    { value: 180, icon: ICON_ROTATE_180, label: "180°" },
+    { value: 270, icon: ICON_ROTATE_270, label: "270°" },
+];
+
+const SPACING_OPTIONS: MenuOption<SpacingMode>[] = [
+    { value: "all", icon: ICON_SPACING_ALL, label: "viewMode.spacingAll" },
+    { value: "none", icon: ICON_SPACING_NONE, label: "viewMode.spacingNone" },
+    { value: "spread-only", icon: ICON_SPACING_SPREAD, label: "viewMode.spacingSpread" },
+    { value: "page-only", icon: ICON_SPACING_PAGE, label: "viewMode.spacingPage" },
+];
+
+export function createViewModeMenu() {
+    const el = document.createElement("div");
+    el.className = "adv-view-mode-menu";
+
+    // Toggle button
+    const toggleBtn = document.createElement("button");
+    toggleBtn.className = "adv-toolbar__btn";
+    toggleBtn.innerHTML = ICON_VIEW_MODE;
+    toggleBtn.title = "View settings";
+    toggleBtn.setAttribute("aria-label", "View settings");
+    toggleBtn.setAttribute("aria-haspopup", "true");
+    toggleBtn.setAttribute("aria-expanded", "false");
+    el.appendChild(toggleBtn);
+
+    // Dropdown panel
+    const dropdown = document.createElement("div");
+    dropdown.className = "adv-view-mode-menu__dropdown";
+    dropdown.setAttribute("role", "group");
+    dropdown.setAttribute("aria-label", "View settings");
+    dropdown.style.display = "none";
+    el.appendChild(dropdown);
+
+    let unsub: (() => void) | null = null;
+    const unsubEvents: Array<() => void> = [];
+    /** Listeners created inside buildDropdown; cleared on each rebuild */
+    let dropdownListeners: Array<() => void> = [];
+    let storeRef: Store<ViewerState, Action> | null = null;
+    let i18nRef: I18n | null = null;
+    let isOpen = false;
+
+    interface SectionOptions {
+        disabled?: boolean;
+        /** When true, currentValue may not match any option */
+        allowNoSelection?: boolean;
+    }
+
+    function createSection<T>(
+        title: string,
+        options: MenuOption<T>[],
+        currentValue: T,
+        onSelect: (value: T) => void,
+        sectionOptions: SectionOptions = {},
+    ): HTMLElement {
+        const section = document.createElement("div");
+        section.className = "adv-view-mode-menu__section";
+
+        const titleEl = document.createElement("div");
+        titleEl.className = "adv-view-mode-menu__title";
+        titleEl.textContent = title;
+        section.appendChild(titleEl);
+
+        const optionsContainer = document.createElement("div");
+        optionsContainer.className = "adv-view-mode-menu__options";
+        optionsContainer.setAttribute("role", "radiogroup");
+        optionsContainer.setAttribute("aria-label", title);
+
+        for (const opt of options) {
+            const btn = document.createElement("button");
+            btn.className = "adv-view-mode-menu__option";
+
+            // Only mark active if value matches and not in "no selection" state
+            const isActive = opt.value === currentValue && !sectionOptions.allowNoSelection;
+            if (isActive) {
+                btn.classList.add("adv-view-mode-menu__option--active");
+            }
+
+            if (sectionOptions.disabled) {
+                btn.disabled = true;
+                btn.classList.add("adv-view-mode-menu__option--disabled");
+            }
+
+            btn.title = i18nRef ? i18nRef.t(opt.label) : opt.label;
+            btn.setAttribute("aria-label", i18nRef ? i18nRef.t(opt.label) : opt.label);
+            btn.setAttribute("aria-pressed", String(isActive));
+
+            const iconSpan = document.createElement("span");
+            iconSpan.className = "adv-view-mode-menu__option-icon";
+            iconSpan.innerHTML = opt.icon;
+            btn.appendChild(iconSpan);
+
+            if (!sectionOptions.disabled) {
+                dropdownListeners.push(
+                    on(btn, "click", (e: MouseEvent) => {
+                        e.stopPropagation();
+                        onSelect(opt.value);
+                    }),
+                );
+            }
+
+            optionsContainer.appendChild(btn);
+        }
+
+        section.appendChild(optionsContainer);
+        return section;
+    }
+
+    function buildDropdown(slice: ViewModeSlice): void {
+        // Clean up listeners from previous build
+        for (const off of dropdownListeners) off();
+        dropdownListeners = [];
+
+        // Clear existing content
+        dropdown.innerHTML = "";
+
+        const isPaged = slice.viewMode === "paged";
+
+        // View mode section (paged vs continuous)
+        dropdown.appendChild(
+            createSection(i18nRef!.t("viewMode.view"), VIEW_MODE_OPTIONS, slice.viewMode, (mode) => {
+                storeRef?.dispatch({ type: "SET_VIEW_MODE", mode });
+            }),
+        );
+
+        const disabledInContinuous = !isPaged ? { disabled: true, allowNoSelection: true } : {};
+
+        // Scroll mode section
+        dropdown.appendChild(
+            createSection(
+                i18nRef!.t("viewMode.scroll"),
+                SCROLL_OPTIONS,
+                slice.scrollMode,
+                (mode) => {
+                    storeRef?.dispatch({ type: "SET_SCROLL_MODE", mode });
+                },
+                disabledInContinuous,
+            ),
+        );
+
+        // Layout mode section
+        dropdown.appendChild(
+            createSection(
+                i18nRef!.t("viewMode.layout"),
+                LAYOUT_OPTIONS,
+                slice.layoutMode,
+                (mode) => {
+                    storeRef?.dispatch({ type: "SET_LAYOUT_MODE", mode });
+                },
+                disabledInContinuous,
+            ),
+        );
+
+        // Page rotation section
+        dropdown.appendChild(
+            createSection(
+                i18nRef!.t("viewMode.rotation"),
+                ROTATION_OPTIONS,
+                slice.pageRotation,
+                (rotation) => {
+                    storeRef?.dispatch({ type: "SET_PAGE_ROTATION", rotation });
+                },
+                disabledInContinuous,
+            ),
+        );
+
+        // Spacing section
+        dropdown.appendChild(
+            createSection(
+                i18nRef!.t("viewMode.spacing"),
+                SPACING_OPTIONS,
+                slice.spacingMode,
+                (mode) => {
+                    storeRef?.dispatch({ type: "SET_SPACING_MODE", mode });
+                },
+                disabledInContinuous,
+            ),
+        );
+    }
+
+    function toggleDropdown(): void {
+        isOpen = !isOpen;
+        dropdown.style.display = isOpen ? "block" : "none";
+        toggleBtn.classList.toggle("adv-toolbar__btn--active", isOpen);
+        toggleBtn.setAttribute("aria-expanded", String(isOpen));
+    }
+
+    function closeDropdown(): void {
+        if (isOpen) {
+            isOpen = false;
+            dropdown.style.display = "none";
+            toggleBtn.classList.remove("adv-toolbar__btn--active");
+            toggleBtn.setAttribute("aria-expanded", "false");
+        }
+    }
+
+    function mount(store: Store<ViewerState, Action>, i18n: I18n): void {
+        storeRef = store;
+        i18nRef = i18n;
+
+        toggleBtn.title = i18n.t("viewMode.label");
+        toggleBtn.setAttribute("aria-label", i18n.t("viewMode.label"));
+        dropdown.setAttribute("aria-label", i18n.t("viewMode.label"));
+
+        // Toggle button click
+        unsubEvents.push(
+            on(toggleBtn, "click", (e: MouseEvent) => {
+                e.stopPropagation();
+                toggleDropdown();
+            }),
+        );
+
+        // Close on outside click
+        const handleOutsideClick = (e: MouseEvent) => {
+            if (!el.contains(e.target as Node)) {
+                closeDropdown();
+            }
+        };
+        document.addEventListener("click", handleOutsideClick);
+        unsubEvents.push(() => document.removeEventListener("click", handleOutsideClick));
+
+        // Close on escape
+        const handleEscape = (e: KeyboardEvent) => {
+            if (e.key === "Escape") {
+                closeDropdown();
+            }
+        };
+        document.addEventListener("keydown", handleEscape);
+        unsubEvents.push(() => document.removeEventListener("keydown", handleEscape));
+
+        const applyState = (slice: ViewModeSlice) => {
+            buildDropdown(slice);
+        };
+
+        // Initial build
+        applyState(selectSlice(store.getState()));
+
+        // Subscribe to changes
+        unsub = subscribeSelector(store, selectSlice, applyState, {
+            equality: sliceEqual,
+        });
+    }
+
+    function destroy(): void {
+        if (unsub) unsub();
+        for (const off of dropdownListeners) off();
+        dropdownListeners = [];
+        for (const off of unsubEvents) off();
+        el.remove();
+    }
+
+    return { el, mount, destroy };
+}
+
+function selectSlice(state: ViewerState): ViewModeSlice {
+    return {
+        viewMode: state.viewMode,
+        scrollMode: state.scrollMode,
+        layoutMode: state.layoutMode,
+        pageRotation: state.pageRotation,
+        spacingMode: state.spacingMode,
+    };
+}

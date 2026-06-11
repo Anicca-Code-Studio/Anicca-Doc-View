@@ -1,0 +1,9 @@
+Anicca Doc View - Engine Runtime
+Copyright (c) 2026 Anicca Code Studio
+
+This engine is built from the anicca-engine Rust source (see /engine) and is
+licensed under the MIT License, identical to the rest of anicca-doc-view.
+See the repository LICENSE file for full terms.
+
+Bundled fonts: DejaVu Sans (Bitstream Vera / public domain derivative),
+distributed under the DejaVu Fonts License (permissive, attribution-style).
