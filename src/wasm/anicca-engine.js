@@ -96,7 +96,6 @@ function takeFromExternrefTable0(idx) {
     return value;
 }
 /**
- * Free function: parse basic identity from raw font bytes.
  * @param {Uint8Array} data
  * @returns {any}
  */
