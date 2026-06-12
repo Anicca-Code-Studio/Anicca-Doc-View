@@ -2,13 +2,11 @@
 //! Copyright (c) 2026 Anicca Code Studio. MIT licensed.
 //!
 //! Exposes a `Wasm` class plus `parseFontInfo`, matching the interface the
-//! viewer's worker expects, so it is a drop-in replacement for the previous
-//! engine. This milestone implements the DOCX path natively; other formats
-//! return an explicit "not yet supported" error.
+//! viewer's worker expects.
 
-mod docx;
-mod model;
-mod render;
+pub mod docx;
+pub mod model;
+pub mod render;
 
 use std::collections::HashMap;
 
@@ -16,7 +14,7 @@ use cosmic_text::{FontSystem, SwashCache};
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
-use model::Document;
+use model::{Block, Document};
 
 fn to_js<T: Serialize>(v: &T) -> Result<JsValue, JsValue> {
     let s = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
@@ -99,7 +97,6 @@ struct OutlineItemJs {
     initially_collapsed: bool,
 }
 
-/// Builds a nested outline from a flat (level, title, page) list.
 fn build_outline(entries: &[(u8, String, usize)], i: &mut usize, level: u8) -> Vec<OutlineItemJs> {
     let mut nodes = Vec::new();
     while *i < entries.len() {
@@ -144,8 +141,6 @@ impl Wasm {
         }
     }
 
-    // ---- lifecycle / licensing (no permit, no telemetry) ----
-
     pub fn init_gpu(&mut self) -> bool {
         false
     }
@@ -164,8 +159,6 @@ impl Wasm {
         to_js(&LicenseResultJs::licensed())
     }
 
-    // ---- loading ----
-
     pub fn load(&mut self, bytes: Vec<u8>) -> Result<String, JsValue> {
         if !docx::is_zip(&bytes) {
             return Err(JsValue::from_str(
@@ -173,9 +166,14 @@ impl Wasm {
             ));
         }
         let mut doc = docx::parse(&bytes).map_err(|e| JsValue::from_str(&e))?;
-        let (page_count, paragraph_pages) = render::measure(&mut self.fonts, &doc);
+
+        // Load embedded fonts from the DOCX into our FontSystem
+        render::load_embedded_fonts(&mut self.fonts, &doc.embedded_fonts);
+
+        // Compute layout metrics
+        let (page_count, block_pages) = render::measure(&mut self.fonts, &doc);
         doc.page_count = page_count;
-        doc.paragraph_pages = paragraph_pages;
+        doc.block_pages = block_pages;
 
         let id = format!("doc-{}", self.next_id);
         self.next_id += 1;
@@ -202,8 +200,6 @@ impl Wasm {
     pub fn authenticate(&mut self, _document_id: String, _password: String) -> bool {
         true
     }
-
-    // ---- page metrics ----
 
     pub fn page_count(&self, document_id: String) -> usize {
         self.docs.get(&document_id).map(|d| d.page_count).unwrap_or(0)
@@ -238,8 +234,6 @@ impl Wasm {
         }])
     }
 
-    // ---- rendering ----
-
     pub fn render_page_to_rgba(
         &mut self,
         document_id: String,
@@ -247,8 +241,6 @@ impl Wasm {
         width: usize,
         height: usize,
     ) -> Result<Vec<u8>, JsValue> {
-        // Take the document out briefly to satisfy the borrow checker (render
-        // needs &mut fonts/swash while reading &doc).
         let doc = self
             .docs
             .remove(&document_id)
@@ -268,21 +260,23 @@ impl Wasm {
         Err(JsValue::from_str("gpu rendering not supported"))
     }
 
-    // ---- structure (empty for DOCX milestone) ----
-
     pub fn get_outline(&self, document_id: String) -> Result<JsValue, JsValue> {
         let doc = self.doc(&document_id)?;
         let mut entries: Vec<(u8, String, usize)> = Vec::new();
-        for (i, p) in doc.paragraphs.iter().enumerate() {
-            if let Some(lvl) = p.outline_level {
-                let title = p.text();
-                if title.trim().is_empty() {
-                    continue;
+
+        for (i, block) in doc.blocks.iter().enumerate() {
+            if let Block::Paragraph(p) = block {
+                if let Some(lvl) = p.outline_level {
+                    let title = p.text();
+                    if title.trim().is_empty() {
+                        continue;
+                    }
+                    let page = doc.block_pages.get(i).copied().unwrap_or(0);
+                    entries.push((lvl, title, page));
                 }
-                let page = doc.paragraph_pages.get(i).copied().unwrap_or(0);
-                entries.push((lvl, title, page));
             }
         }
+
         if entries.is_empty() {
             return to_js(&Vec::<OutlineItemJs>::new());
         }
@@ -345,8 +339,6 @@ impl Wasm {
     #[wasm_bindgen(js_name = enableGoogleFonts)]
     pub fn enable_google_fonts(&mut self) {}
 
-    // ---- PDF-only operations: not supported in this engine ----
-
     pub fn pdf_compose(&mut self, _compositions: JsValue, _doc_ids: JsValue) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str("pdf operations not supported"))
     }
@@ -397,7 +389,6 @@ impl Wasm {
     }
 }
 
-/// Free function: parse basic identity from raw font bytes.
 #[wasm_bindgen(js_name = parseFontInfo)]
 pub fn parse_font_info(data: Vec<u8>) -> Result<JsValue, JsValue> {
     let (typeface, bold, italic) = match ttf_parser::Face::parse(&data, 0) {
@@ -427,11 +418,7 @@ pub fn parse_font_info(data: Vec<u8>) -> Result<JsValue, JsValue> {
     };
 
     let s = serde_wasm_bindgen::Serializer::new().serialize_maps_as_objects(true);
-    FontInfoJs {
-        typeface,
-        bold,
-        italic,
-    }
-    .serialize(&s)
-    .map_err(|e| JsValue::from_str(&e.to_string()))
+    FontInfoJs { typeface, bold, italic }
+        .serialize(&s)
+        .map_err(|e| JsValue::from_str(&e.to_string()))
 }
