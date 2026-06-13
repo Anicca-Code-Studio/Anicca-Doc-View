@@ -285,6 +285,8 @@ struct RawStyle {
     based_on: Option<String>,
     name: Option<String>,
     props: StyleProps,
+    /// Table style cell margins (w:tblCellMar), per side: top/left/bottom/right.
+    cell_margins: [Option<u32>; 4],
 }
 
 struct Styles {
@@ -318,6 +320,34 @@ impl Styles {
                     out.outline_level = Some(lvl);
                 }
             }
+        }
+        out
+    }
+
+    /// Resolve a table style's cell margins (w:tblCellMar) through basedOn.
+    fn resolve_cell_margins(&self, style_id: &str) -> crate::model::CellMargins {
+        let mut chain: Vec<&RawStyle> = Vec::new();
+        let mut cur = Some(style_id.to_string());
+        let mut guard = 0;
+        while let Some(id) = cur {
+            if let Some(s) = self.map.get(&id) {
+                chain.push(s);
+                cur = s.based_on.clone();
+            } else {
+                break;
+            }
+            guard += 1;
+            if guard > 32 {
+                break;
+            }
+        }
+        chain.reverse();
+        let mut out = crate::model::CellMargins::default();
+        for s in chain {
+            if let Some(v) = s.cell_margins[0] { out.top = v; }
+            if let Some(v) = s.cell_margins[1] { out.left = v; }
+            if let Some(v) = s.cell_margins[2] { out.bottom = v; }
+            if let Some(v) = s.cell_margins[3] { out.right = v; }
         }
         out
     }
@@ -406,6 +436,7 @@ fn parse_styles_xml(xml: &str) -> Styles {
     let mut cur_id: Option<String> = None;
     let mut cur: RawStyle = RawStyle::default();
     let mut in_doc_defaults = false;
+    let mut in_cell_mar = false;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -425,6 +456,20 @@ fn parse_styles_xml(xml: &str) -> Styles {
                         cur.based_on = attr_val(&e, b"w:val");
                     }
                 }
+                b"w:tblCellMar" => in_cell_mar = true,
+                b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_cell_mar => {
+                    if cur_id.is_some() {
+                        if let Some(v) = attr_val(&e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                            let idx = match e.name().as_ref() {
+                                b"w:top" => 0,
+                                b"w:left" => 1,
+                                b"w:bottom" => 2,
+                                _ => 3,
+                            };
+                            cur.cell_margins[idx] = Some(v);
+                        }
+                    }
+                }
                 _ => {
                     if cur_id.is_some() {
                         apply_prop(&mut cur.props, &e);
@@ -435,6 +480,7 @@ fn parse_styles_xml(xml: &str) -> Styles {
             },
             Ok(Event::End(e)) => match e.name().as_ref() {
                 b"w:docDefaults" => in_doc_defaults = false,
+                b"w:tblCellMar" => in_cell_mar = false,
                 b"w:style" => {
                     if let Some(id) = cur_id.take() {
                         map.insert(id, std::mem::take(&mut cur));
@@ -822,6 +868,8 @@ impl<'a> DocParser<'a> {
         let mut in_tbl_borders = false;
         let mut in_tc_borders = false;
         let mut in_tbl_grid = false;
+        let mut in_tbl_cell_mar = false;
+        let mut in_tc_mar = false;
 
         loop {
             match reader.read_event_into(buf) {
@@ -830,6 +878,8 @@ impl<'a> DocParser<'a> {
                         b"w:tblBorders" => { in_tbl_borders = true; }
                         b"w:tcBorders" => { in_tc_borders = true; }
                         b"w:tblGrid" => { in_tbl_grid = true; }
+                        b"w:tblCellMar" => { in_tbl_cell_mar = true; }
+                        b"w:tcMar" => { in_tc_mar = true; }
                         b"w:tr" => {
                             cur_row = Some(TableRow::default());
                         }
@@ -863,6 +913,37 @@ impl<'a> DocParser<'a> {
                             if let Some(cell) = cur_cell.as_mut() {
                                 if let Some(v) = attr_val(e, b"w:val").and_then(|s| s.parse::<u32>().ok()) {
                                     cell.grid_span = v.max(1);
+                                }
+                            }
+                        }
+                        // Table style: resolve cell margins from styles.xml
+                        b"w:tblStyle" => {
+                            if let Some(id) = attr_val(e, b"w:val") {
+                                table.cell_margins = self.styles.resolve_cell_margins(&id);
+                            }
+                        }
+                        // Table-level cell margins (w:tblCellMar) override the style
+                        b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_tbl_cell_mar => {
+                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                                match e.name().as_ref() {
+                                    b"w:top" => table.cell_margins.top = v,
+                                    b"w:left" => table.cell_margins.left = v,
+                                    b"w:bottom" => table.cell_margins.bottom = v,
+                                    _ => table.cell_margins.right = v,
+                                }
+                            }
+                        }
+                        // Per-cell margins (w:tcMar) override the table
+                        b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_tc_mar => {
+                            if let Some(cell) = cur_cell.as_mut() {
+                                if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                                    let m = cell.margins.get_or_insert(table.cell_margins);
+                                    match e.name().as_ref() {
+                                        b"w:top" => m.top = v,
+                                        b"w:left" => m.left = v,
+                                        b"w:bottom" => m.bottom = v,
+                                        _ => m.right = v,
+                                    }
                                 }
                             }
                         }
@@ -932,6 +1013,8 @@ impl<'a> DocParser<'a> {
                         b"w:tblBorders" => { in_tbl_borders = false; }
                         b"w:tcBorders" => { in_tc_borders = false; }
                         b"w:tblGrid" => { in_tbl_grid = false; }
+                        b"w:tblCellMar" => { in_tbl_cell_mar = false; }
+                        b"w:tcMar" => { in_tc_mar = false; }
                         b"w:tr" => {
                             if let Some(row) = cur_row.take() {
                                 table.rows.push(row);
@@ -1263,7 +1346,9 @@ impl<'a> DocParser<'a> {
                         is_anchor_drawing = false;
                     }
                     b"w:p" => {
-                        // Finalize paragraph
+                        // Finalize paragraph. cur_style carries pPr>rPr props
+                        // (e.g. the paragraph mark's w:sz) when no runs exist.
+                        para.mark_style = cur_style.clone();
                         if let Some(v) = para_props.align {
                             para.align = v;
                         }

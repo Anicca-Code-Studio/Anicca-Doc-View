@@ -139,6 +139,9 @@ pub struct Paragraph {
     pub list_hanging_pt: f32,
     /// Tab stops defined in paragraph properties.
     pub tab_stops: Vec<TabStop>,
+    /// Paragraph-mark run style; determines the height of empty paragraphs
+    /// (e.g. blank header lines with an explicit w:sz on the mark).
+    pub mark_style: RunStyle,
 }
 
 impl Default for Paragraph {
@@ -157,6 +160,7 @@ impl Default for Paragraph {
             list_prefix: None,
             list_hanging_pt: 0.0,
             tab_stops: Vec::new(),
+            mark_style: RunStyle::default(),
         }
     }
 }
@@ -209,6 +213,21 @@ pub struct Borders {
     pub inside_v: BorderLine,
 }
 
+/// Cell padding in DXA. OOXML default: 108 left/right, 0 top/bottom.
+#[derive(Clone, Copy, Debug)]
+pub struct CellMargins {
+    pub top: u32,
+    pub left: u32,
+    pub bottom: u32,
+    pub right: u32,
+}
+
+impl Default for CellMargins {
+    fn default() -> Self {
+        CellMargins { top: 0, left: 108, bottom: 0, right: 108 }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TableCell {
     pub blocks: Vec<Block>,
@@ -219,6 +238,8 @@ pub struct TableCell {
     pub borders: Borders,
     /// Cell background color (None = transparent/white).
     pub bg_color: Option<[u8; 3]>,
+    /// Per-cell margin override (w:tcMar); None = inherit from table.
+    pub margins: Option<CellMargins>,
 }
 
 impl Default for TableCell {
@@ -229,6 +250,7 @@ impl Default for TableCell {
             grid_span: 1,
             borders: Borders::default(),
             bg_color: None,
+            margins: None,
         }
     }
 }
@@ -263,8 +285,8 @@ pub struct Table {
     /// extend left of the margin).
     pub indent_dxa: i32,
     pub borders: Borders,
-    /// Cell margin in DXA (applied to all cells unless overridden).
-    pub cell_margin_dxa: u32,
+    /// Default cell margins for the table (style, then w:tblCellMar).
+    pub cell_margins: CellMargins,
     /// Grid column widths in DXA from <w:tblGrid>. Authoritative when non-empty.
     pub grid_col_widths: Vec<u32>,
 }
@@ -277,7 +299,7 @@ impl Default for Table {
             width_is_pct: false,
             indent_dxa: 0,
             borders: Borders::default(),
-            cell_margin_dxa: 72, // 72 DXA = ~3.6pt default Word cell margin
+            cell_margins: CellMargins::default(),
             grid_col_widths: Vec::new(),
         }
     }

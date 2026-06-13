@@ -9,26 +9,48 @@ use cosmic_text::{
 
 use crate::model::{Align, AnchorImage, Block, BorderStyle, Document, ImageFormat, Paragraph, Table, TabAlign, TabLeader};
 
-// Word's single-spacing line height comes from font hhea metrics, typically
-// ~1.17 em (Roboto 1.172, DejaVu 1.164). A flat 1.15 paginates too tight.
-const LINE_FACTOR: f32 = 1.17;
+// Single-spacing line height multiplier. The reference viewer uses 1.15.
+const LINE_FACTOR: f32 = 1.15;
 const EMU_PER_PT: f64 = 12700.0;
 
 // ── font system ───────────────────────────────────────────────────────────────
 
 pub fn new_font_system() -> FontSystem {
     let mut db = cosmic_text::fontdb::Database::new();
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Oblique.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-BoldOblique.ttf").to_vec());
+    // Roboto: Google Docs default; documents exported from GDocs declare it.
+    db.load_font_data(include_bytes!("../fonts/Roboto-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Roboto-Bold.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Roboto-Italic.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Roboto-BoldItalic.ttf").to_vec());
+    // Liberation Sans/Serif: metric-compatible with Arial / Times New Roman.
+    db.load_font_data(include_bytes!("../fonts/LiberationSans-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSans-Bold.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSans-Italic.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSans-BoldItalic.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Bold.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Italic.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf").to_vec());
+    // Times New Roman: exact match for documents that declare it.
     db.load_font_data(include_bytes!("../fonts/TimesNewRoman.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/TimesNewRoman-Bold.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/TimesNewRoman-Italic.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/TimesNewRoman-BoldItalic.ttf").to_vec());
-    db.set_sans_serif_family("DejaVu Sans");
-    db.set_serif_family("Times New Roman");
-    FontSystem::new_with_locale_and_db("en-US".to_string(), db)
+    // Carlito: metric-compatible with Calibri.
+    db.load_font_data(include_bytes!("../fonts/Carlito-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Carlito-Bold.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Carlito-Italic.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/Carlito-BoldItalic.ttf").to_vec());
+    // DejaVu Sans: wide Unicode coverage, last-resort only.
+    db.load_font_data(include_bytes!("../fonts/DejaVuSans.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Bold.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Oblique.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/DejaVuSans-BoldOblique.ttf").to_vec());
+    db.set_sans_serif_family("Liberation Sans");
+    db.set_serif_family("Liberation Serif");
+    let fs = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
+    register_families(&fs);
+    fs
 }
 
 /// Load document's embedded fonts into an existing FontSystem.
@@ -37,6 +59,61 @@ pub fn load_embedded_fonts(fs: &mut FontSystem, fonts: &[Vec<u8>]) {
         if data.len() >= 4 {
             fs.db_mut().load_font_data(data.clone());
         }
+    }
+    register_families(fs);
+}
+
+/// Families actually present in the font db (bundled + embedded). Used so an
+/// exact-name match (e.g. a font embedded in the DOCX) always wins before any
+/// substitution.
+fn family_set() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn register_families(fs: &FontSystem) {
+    if let Ok(mut set) = family_set().lock() {
+        for face in fs.db().faces() {
+            for (name, _) in &face.families {
+                set.insert(name.to_ascii_lowercase());
+            }
+        }
+    }
+}
+
+/// True when the name describes a serif face.
+fn is_serif_name(lower: &str) -> bool {
+    (lower.contains("serif") && !lower.contains("sans"))
+        || lower.contains("times")
+        || lower.contains("roman")
+        || matches!(
+            lower,
+            "cambria" | "georgia" | "garamond" | "book antiqua" | "palatino"
+                | "palatino linotype" | "constantia" | "baskerville"
+        )
+}
+
+/// Resolve a document font name to a loaded family, matching how Google Docs
+/// (the layout reference) renders documents. Exact matches (bundled or
+/// embedded in the DOCX) win; otherwise substitute a metric-compatible face:
+/// Arial-class names get Liberation Sans, Calibri gets Carlito, serif names
+/// get Liberation Serif, anything else falls back to Liberation Sans.
+fn resolve_family(name: &str) -> Family<'_> {
+    let lower = name.to_ascii_lowercase();
+    let available = family_set()
+        .lock()
+        .map(|s| s.contains(&lower))
+        .unwrap_or(false);
+    if available {
+        return Family::Name(name);
+    }
+    if is_serif_name(&lower) {
+        return Family::Name("Liberation Serif");
+    }
+    match lower.as_str() {
+        "calibri" => Family::Name("Carlito"),
+        _ => Family::Name("Liberation Sans"),
     }
 }
 
@@ -69,12 +146,18 @@ fn page_of(y: f32, page_h: f32) -> usize {
 /// Lays out one paragraph. `width_px` is the available content width in pixels.
 /// Returns the laid-out Buffer.
 fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale: f32) -> Buffer {
+    let has_text = para
+        .runs
+        .iter()
+        .any(|r| r.inline_image.is_none() && !r.text.is_empty());
+    // Empty paragraphs take the height of their paragraph mark (w:sz on pPr>rPr).
+    let base_pt = if has_text { 11.0 } else { para.mark_style.size_pt };
     let max_pt = para
         .runs
         .iter()
         .filter(|r| r.inline_image.is_none())
         .map(|r| r.style.size_pt)
-        .fold(11.0_f32, f32::max);
+        .fold(base_pt, f32::max);
     let font_px = (max_pt * scale).max(1.0);
     let line_px = (font_px * LINE_FACTOR * para.line_pct.max(0.5)).max(1.0);
 
@@ -104,7 +187,7 @@ fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale:
     }
 
     if spans.is_empty() {
-        spans.push((" ", default_attrs.clone()));
+        spans.push((" ", run_attrs(&para.mark_style, scale)));
     }
 
     buffer.set_rich_text(
@@ -124,7 +207,7 @@ fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale:
 fn run_attrs<'a>(style: &'a crate::model::RunStyle, scale: f32) -> Attrs<'a> {
     let sz = (style.size_pt * scale).max(1.0);
     let family = if let Some(ref name) = style.font_name {
-        Family::Name(name.as_str())
+        resolve_family(name.as_str())
     } else {
         Family::SansSerif
     };
@@ -211,7 +294,10 @@ fn table_px(table: &Table, content_w_px: f32, scale: f32) -> f32 {
         // pct type: width_dxa is in 50ths-of-percent (5000 = 100%)
         (content_w_px * table.width_dxa as f32 / 5000.0).min(content_w_px)
     } else if table.width_dxa > 0 {
-        (table.width_dxa as f32 / 20.0 * scale).min(content_w_px)
+        // Use declared DXA width directly (fixed-layout tables may intentionally
+        // exceed the text column by a few points; clamping would shrink columns
+        // and cause text to wrap in narrow header cells).
+        table.width_dxa as f32 / 20.0 * scale
     } else {
         content_w_px
     }
@@ -254,26 +340,32 @@ fn col_widths(table: &Table, content_w_px: f32, scale: f32) -> Vec<f32> {
     vec![w; ncols]
 }
 
+/// Effective margins for a cell (per-cell w:tcMar overrides the table's).
+#[inline]
+fn cell_margins(table: &Table, cell: &crate::model::TableCell) -> crate::model::CellMargins {
+    cell.margins.unwrap_or(table.cell_margins)
+}
+
 /// Compute height of a single table row in pixels.
 fn row_height(
     fs: &mut FontSystem,
     row: &crate::model::TableRow,
     col_ws: &[f32],
-    margin_dxa: u32,
+    table: &Table,
     scale: f32,
 ) -> f32 {
     if row.height_exact && row.height_dxa > 0 {
         return row.height_dxa as f32 / 20.0 * scale;
     }
-    let cell_margin_px = margin_dxa as f32 / 20.0 * scale;
     let mut max_h: f32 = 0.0;
     let mut grid_col = 0usize;
     for cell in row.cells.iter() {
+        let m = cell_margins(table, cell);
         let span = cell.grid_span.max(1) as usize;
         let cw: f32 = (grid_col..grid_col+span).map(|g| col_ws.get(g).copied().unwrap_or(0.0)).sum::<f32>().max(1.0);
         grid_col += span;
-        let inner_w = (cw - cell_margin_px * 2.0).max(1.0);
-        let mut cell_h: f32 = cell_margin_px * 2.0;
+        let inner_w = (cw - (m.left + m.right) as f32 / 20.0 * scale).max(1.0);
+        let mut cell_h: f32 = (m.top + m.bottom) as f32 / 20.0 * scale;
         for block in &cell.blocks {
             match block {
                 Block::Paragraph(p) => {
@@ -301,8 +393,31 @@ fn table_height(fs: &mut FontSystem, table: &Table, content_w_px: f32, scale: f3
     table
         .rows
         .iter()
-        .map(|r| row_height(fs, r, &col_ws, table.cell_margin_dxa, scale))
+        .map(|r| row_height(fs, r, &col_ws, table, scale))
         .sum()
+}
+
+// ── body geometry ─────────────────────────────────────────────────────────────
+
+/// Body top offset and body height in px. Word pushes the body down when the
+/// header content is taller than the space between the header position and the
+/// top margin (and mirrors this at the bottom for footers).
+fn body_metrics(fs: &mut FontSystem, doc: &Document, scale: f32) -> (f32, f32) {
+    let content_w_px = doc.content_w_pt() * scale;
+    let hdr_h = doc
+        .header
+        .as_ref()
+        .map(|h| measure_hf_height(fs, &h.blocks, content_w_px, scale))
+        .unwrap_or(0.0);
+    let ftr_h = doc
+        .footer
+        .as_ref()
+        .map(|f| measure_hf_height(fs, &f.blocks, content_w_px, scale))
+        .unwrap_or(0.0);
+    let top = (doc.margin_t_pt * scale).max(doc.header_margin_pt * scale + hdr_h);
+    let bottom = (doc.margin_b_pt * scale).max(doc.footer_margin_pt * scale + ftr_h);
+    let h = (doc.page_h_pt * scale - top - bottom).max(1.0);
+    (top, h)
 }
 
 // ── measure (pagination) ──────────────────────────────────────────────────────
@@ -310,7 +425,7 @@ fn table_height(fs: &mut FontSystem, table: &Table, content_w_px: f32, scale: f3
 /// Compute page count and per-block starting page. Returns (page_count, block_pages).
 pub fn measure(fs: &mut FontSystem, doc: &Document) -> (usize, Vec<usize>) {
     let content_w = doc.content_w_pt();
-    let content_h = doc.content_h_pt().max(1.0);
+    let (_body_top, content_h) = body_metrics(fs, doc, 1.0);
     let mut cursor = 0.0f32;
     let mut block_pages = Vec::with_capacity(doc.blocks.len());
 
@@ -370,9 +485,9 @@ pub fn render_page(
 
     let scale = out_w as f32 / doc.page_w_pt;
     let margin_l_px = doc.margin_l_pt * scale;
-    let margin_t_px = doc.margin_t_pt * scale;
     let content_w_px = doc.content_w_pt() * scale;
-    let content_h_px = doc.content_h_pt() * scale;
+    // Body geometry honors tall headers/footers (must match measure()).
+    let (margin_t_px, content_h_px) = body_metrics(fs, doc, scale);
     let page_top = page as f32 * content_h_px;
 
     // Displayed page number honors w:pgNumType w:start (e.g. cover = 0)
@@ -458,29 +573,31 @@ pub fn render_page(
                     && para.runs.iter().any(|r| r.text.contains('\t'));
 
                 if has_tabs {
-                    // Custom tab rendering: split at first \t
+                    // Split at LAST \t: everything before = left text (entry title);
+                    // everything after = right text (page number). Intermediate \t → space.
                     let mut left_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
                     let mut right_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
-                    let mut found_tab = false;
                     let mut tab_style: Option<crate::model::RunStyle> = None;
-                    for run in &para.runs {
-                        if run.inline_image.is_some() { continue; }
-                        if !found_tab {
-                            if let Some(tp) = run.text.find('\t') {
-                                let left = run.text[..tp].to_string();
-                                let right = run.text[tp+1..].to_string();
+                    let last_tab_run = para.runs.iter().enumerate()
+                        .filter(|(_, r)| r.inline_image.is_none() && r.text.contains('\t'))
+                        .last().map(|(i, _)| i);
+                    if let Some(last_idx) = last_tab_run {
+                        let last_tab_pos = para.runs[last_idx].text.rfind('\t').unwrap();
+                        for (i, run) in para.runs.iter().enumerate() {
+                            if run.inline_image.is_some() { continue; }
+                            if i < last_idx {
+                                let t = run.text.replace('\t', " ");
+                                if !t.is_empty() { left_parts.push((t, run.style.clone())); }
+                            } else if i == last_idx {
+                                let left = run.text[..last_tab_pos].replace('\t', " ");
+                                let right = run.text[last_tab_pos+1..].to_string();
                                 if !left.is_empty() { left_parts.push((left, run.style.clone())); }
                                 if !right.is_empty() { right_parts.push((right, run.style.clone())); }
                                 tab_style = Some(run.style.clone());
-                                found_tab = true;
                             } else {
                                 if !run.text.is_empty() {
-                                    left_parts.push((run.text.clone(), run.style.clone()));
+                                    right_parts.push((run.text.clone(), run.style.clone()));
                                 }
-                            }
-                        } else {
-                            if !run.text.is_empty() {
-                                right_parts.push((run.text.clone(), run.style.clone()));
                             }
                         }
                     }
@@ -517,29 +634,30 @@ pub fn render_page(
                     if line_pg == page {
                         let baseline = margin_t_px + (cursor + lh * 0.85 - page_top);
 
-                        // Render left text
+                        // Render left text: each part rendered consecutively (track x)
+                        let mut left_cur_x = eff_content_x;
                         for (text, style) in &left_parts {
+                            let tw = measure_text_width(fs, text, style, scale);
                             let mut buf = Buffer::new(fs, Metrics::new(font_px, lh));
-                            buf.set_size(fs, Some(eff_content_w), None);
+                            buf.set_size(fs, Some(tw + 2.0), None);
                             buf.set_text(fs, text.as_str(), run_attrs(style, scale), Shaping::Advanced);
                             buf.shape_until_scroll(fs, false);
                             for run in buf.layout_runs() {
                                 for glyph in run.glyphs.iter() {
                                     let phys = glyph.physical((0.0, 0.0), 1.0);
                                     let color = glyph.color_opt.unwrap_or(Color::rgb(0, 0, 0));
-                                    let pen_x = eff_content_x + phys.x as f32;
+                                    let pen_x = left_cur_x + phys.x as f32;
                                     let pen_y = baseline + phys.y as f32;
                                     if let Some(img) = swash.get_image(fs, phys.cache_key) {
                                         blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color);
                                     }
                                 }
                             }
+                            left_cur_x += tw;
                         }
 
                         // Dot leader if applicable
-                        let left_w: f32 = left_parts.iter()
-                            .map(|(t, s)| measure_text_width(fs, t, s, scale))
-                            .sum();
+                        let left_w = left_cur_x - eff_content_x;
                         let leader_align = right_tab.map(|t| &t.leader).unwrap_or(&TabLeader::None);
                         if *leader_align == TabLeader::Dot {
                             draw_dot_leader(
@@ -787,34 +905,28 @@ fn render_hf_paragraph(
     let has_tab = p.runs.iter().any(|r| r.inline_image.is_none() && r.text.contains('\t'));
 
     if has_tab {
-        // Split at first tab: left text at eff_x, right text right-aligned.
+        // Split at LAST \t: left = title text, right = page number. Intermediate \t → space.
         let mut left_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
         let mut right_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
-        let mut found_tab = false;
         let mut tab_style: Option<crate::model::RunStyle> = None;
-        for run in &p.runs {
-            if run.inline_image.is_some() {
-                continue;
-            }
-            if !found_tab {
-                if let Some(tp) = run.text.find('\t') {
-                    let left = run.text[..tp].to_string();
-                    let right = run.text[tp + 1..].replace('\t', "");
-                    if !left.is_empty() {
-                        left_parts.push((left, run.style.clone()));
-                    }
-                    if !right.is_empty() {
-                        right_parts.push((right, run.style.clone()));
-                    }
+        let last_tab_run = p.runs.iter().enumerate()
+            .filter(|(_, r)| r.inline_image.is_none() && r.text.contains('\t'))
+            .last().map(|(i, _)| i);
+        if let Some(last_idx) = last_tab_run {
+            let last_tab_pos = p.runs[last_idx].text.rfind('\t').unwrap();
+            for (i, run) in p.runs.iter().enumerate() {
+                if run.inline_image.is_some() { continue; }
+                if i < last_idx {
+                    let t = run.text.replace('\t', " ");
+                    if !t.is_empty() { left_parts.push((t, run.style.clone())); }
+                } else if i == last_idx {
+                    let left = run.text[..last_tab_pos].replace('\t', " ");
+                    let right = run.text[last_tab_pos+1..].to_string();
+                    if !left.is_empty() { left_parts.push((left, run.style.clone())); }
+                    if !right.is_empty() { right_parts.push((right, run.style.clone())); }
                     tab_style = Some(run.style.clone());
-                    found_tab = true;
-                } else if !run.text.is_empty() {
-                    left_parts.push((run.text.clone(), run.style.clone()));
-                }
-            } else {
-                let t = run.text.replace('\t', "");
-                if !t.is_empty() {
-                    right_parts.push((t, run.style.clone()));
+                } else {
+                    if !run.text.is_empty() { right_parts.push((run.text.clone(), run.style.clone())); }
                 }
             }
         }
@@ -971,11 +1083,10 @@ fn render_table(
 ) {
     let col_ws = col_widths(table, content_w_px, scale);
     let table_indent_px = table.indent_dxa as f32 / 20.0 * scale;
-    let cell_margin_px = table.cell_margin_dxa as f32 / 20.0 * scale;
     let n_rows = table.rows.len();
 
     for (ri, row) in table.rows.iter().enumerate() {
-        let rh = row_height(fs, row, &col_ws, table.cell_margin_dxa, scale);
+        let rh = row_height(fs, row, &col_ws, table, scale);
         let row_abs_y = *cursor;
         let row_end = row_abs_y + rh;
         let row_start_pg = page_of(row_abs_y, content_h_px);
@@ -1033,9 +1144,10 @@ fn render_table(
 
                 // Cell content flows in absolute coordinates; blocks landing on
                 // a later page render there (row splitting across pages).
-                let inner_x = cell_x + cell_margin_px;
-                let inner_w = (cw - cell_margin_px * 2.0).max(1.0);
-                let mut cur_abs = row_abs_y + cell_margin_px;
+                let m = cell_margins(table, cell);
+                let inner_x = cell_x + m.left as f32 / 20.0 * scale;
+                let inner_w = (cw - (m.left + m.right) as f32 / 20.0 * scale).max(1.0);
+                let mut cur_abs = row_abs_y + m.top as f32 / 20.0 * scale;
                 render_cell_blocks(
                     fs, swash, rgba, out_w, out_h,
                     &cell.blocks, inner_x, inner_w, &mut cur_abs,
