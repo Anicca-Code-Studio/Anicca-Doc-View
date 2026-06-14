@@ -202,16 +202,12 @@ export interface ViewerOptions {
 
     /**
      * Hide the "Powered by Anicca Code Studio" attribution link.
-     * Requires a valid license with the "no_attribution" feature.
-     * Ignored without a qualifying license.
      * @default false
      */
     hideAttribution?: boolean;
 
     /**
      * Hide the loading overlay shown during document download and processing.
-     * Requires a valid license with the "no_attribution" feature.
-     * Ignored without a qualifying license.
      * @default false
      */
     hideLoadingOverlay?: boolean;
@@ -620,8 +616,8 @@ export class AniccaClient {
     async createViewer(options: ViewerOptions = {}): Promise<AniccaViewer> {
         this.ensureNotDestroyed();
 
-        const showAttribution = !(options.hideAttribution && this.hasFeature("no_attribution"));
-        const showLoadingOverlay = !(options.hideLoadingOverlay && this.hasFeature("no_attribution"));
+        const showAttribution = !options.hideAttribution;
+        const showLoadingOverlay = !options.hideLoadingOverlay;
         const viewer = new AniccaViewer(
             this.workerClient,
             options,
