@@ -40,6 +40,16 @@ fn toggle_on(e: &BytesStart, key: &[u8]) -> bool {
     }
 }
 
+/// Parse DXA (twentieths-of-a-point) value that may be integer or float string.
+/// Newer Word/LibreOffice write "3450.0" instead of "3450"; u32::parse fails on those.
+fn parse_dxa(s: &str) -> Option<u32> {
+    s.parse::<f64>().ok().map(|v| v.round() as u32)
+}
+
+fn parse_dxa_i32(s: &str) -> Option<i32> {
+    s.parse::<f64>().ok().map(|v| v.round() as i32)
+}
+
 fn parse_color(v: &str) -> Option<[u8; 3]> {
     if v.eq_ignore_ascii_case("auto") || v.len() != 6 {
         return None;
@@ -101,22 +111,28 @@ fn heading_level(name: &str) -> Option<u8> {
 
 /// Field char state machine: after the "separate" marker of a PAGE field, the
 /// next w:t run is the cached page number and gets flagged for substitution.
-fn handle_fld_char(e: &BytesStart, instr: &mut String, pending_page: &mut bool) {
+/// Returns true if a PAGE run should be flushed immediately (when fldChar "end"
+/// arrives while pending_page is still true — meaning no cached w:t was present).
+fn handle_fld_char(e: &BytesStart, instr: &mut String, pending_page: &mut bool) -> bool {
     match attr_val(e, b"w:fldCharType").as_deref() {
         Some("begin") => {
             instr.clear();
             *pending_page = false;
+            false
         }
         Some("separate") => {
             *pending_page = instr
                 .split_whitespace()
                 .any(|t| t.eq_ignore_ascii_case("PAGE"));
+            false
         }
         Some("end") => {
+            let flush = *pending_page;
             *pending_page = false;
             instr.clear();
+            flush
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -174,6 +190,41 @@ fn deobfuscate_odttf(font_bytes: &mut Vec<u8>, font_key: &str) {
 struct EmbedRef {
     rid: String,
     font_key: String,
+}
+
+/// Returns all unique font family names declared in a DOCX (from word/fontTable.xml).
+/// Used by JS to prefetch fonts before rendering.
+pub fn extract_font_declarations(bytes: &[u8]) -> Vec<String> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return Vec::new(),
+    };
+    let xml = match read_zip_text(&mut archive, "word/fontTable.xml") {
+        Some(x) => x,
+        None => return Vec::new(),
+    };
+    let mut reader = Reader::from_str(&xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(ref e)) | Ok(Event::Start(ref e)) => {
+                if e.local_name().as_ref() == b"font" {
+                    if let Some(name) = attr_val(e, b"w:name") {
+                        if !name.is_empty() && !names.contains(&name) {
+                            names.push(name);
+                        }
+                    }
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    names
 }
 
 /// Parses fontTable.xml and returns (font_name, rid, font_key) triples for embedded fonts.
@@ -241,12 +292,18 @@ struct StyleProps {
     underline: Option<bool>,
     strike: Option<bool>,
     size_pt: Option<f32>,
+    size_cs_pt: Option<f32>,
     color: Option<[u8; 3]>,
     font_name: Option<String>,
+    font_name_east_asia: Option<String>,
     align: Option<Align>,
     space_before_pt: Option<f32>,
     space_after_pt: Option<f32>,
+    space_before_lines: Option<f32>,
+    space_after_lines: Option<f32>,
     line_pct: Option<f32>,
+    line_height_exact_pt: Option<f32>,
+    line_height_atleast_pt: Option<f32>,
     outline_level: Option<u8>,
     indent_left_pt: Option<f32>,
     indent_right_pt: Option<f32>,
@@ -267,12 +324,18 @@ impl StyleProps {
         take!(underline);
         take!(strike);
         take!(size_pt);
+        take!(size_cs_pt);
         take!(color);
         take!(font_name);
+        take!(font_name_east_asia);
         take!(align);
         take!(space_before_pt);
         take!(space_after_pt);
+        take!(space_before_lines);
+        take!(space_after_lines);
         take!(line_pct);
+        take!(line_height_exact_pt);
+        take!(line_height_atleast_pt);
         take!(outline_level);
         take!(indent_left_pt);
         take!(indent_right_pt);
@@ -375,12 +438,19 @@ fn apply_prop(t: &mut StyleProps, e: &BytesStart) {
             }
         }
         b"w:rFonts" => {
-            // w:ascii is the most common; fall back to w:hAnsi
             let name = attr_val(e, b"w:ascii")
                 .or_else(|| attr_val(e, b"w:hAnsi"))
                 .or_else(|| attr_val(e, b"w:cs"));
             if name.is_some() {
                 t.font_name = name;
+            }
+            if let Some(ea) = attr_val(e, b"w:eastAsia") {
+                t.font_name_east_asia = Some(ea);
+            }
+        }
+        b"w:szCs" => {
+            if let Some(v) = attr_val(e, b"w:val").and_then(|s| s.parse::<f32>().ok()) {
+                t.size_cs_pt = Some(v / 2.0);
             }
         }
         b"w:jc" => {
@@ -395,14 +465,28 @@ fn apply_prop(t: &mut StyleProps, e: &BytesStart) {
             if let Some(v) = attr_val(e, b"w:before").and_then(|s| s.parse::<f32>().ok()) {
                 t.space_before_pt = Some(v / TWIPS_PER_PT);
             }
+            // Lines-based spacing (100ths of a line) overrides twips-based when present
+            if let Some(v) = attr_val(e, b"w:afterLines").and_then(|s| s.parse::<f32>().ok()) {
+                t.space_after_lines = Some(v / 100.0);
+            }
+            if let Some(v) = attr_val(e, b"w:beforeLines").and_then(|s| s.parse::<f32>().ok()) {
+                t.space_before_lines = Some(v / 100.0);
+            }
             let rule = attr_val(e, b"w:lineRule").unwrap_or_default();
             if let Some(v) = attr_val(e, b"w:line").and_then(|s| s.parse::<f32>().ok()) {
-                if rule == "auto" || rule.is_empty() {
-                    t.line_pct = Some(v / 240.0);
-                } else if rule == "exact" || rule == "atLeast" {
-                    // line in twips → points; store as pct relative to default line height
-                    let pt = v / TWIPS_PER_PT;
-                    t.line_pct = Some(pt / 12.0); // approximate
+                match rule.as_str() {
+                    "exact" => {
+                        // w:line in twips → absolute points
+                        t.line_height_exact_pt = Some(v / TWIPS_PER_PT);
+                    }
+                    "atLeast" => {
+                        // w:line in twips → minimum points
+                        t.line_height_atleast_pt = Some(v / TWIPS_PER_PT);
+                    }
+                    _ => {
+                        // "auto" or empty: 240 units = single space (ratio)
+                        t.line_pct = Some(v / 240.0);
+                    }
                 }
             }
         }
@@ -459,7 +543,7 @@ fn parse_styles_xml(xml: &str) -> Styles {
                 b"w:tblCellMar" => in_cell_mar = true,
                 b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_cell_mar => {
                     if cur_id.is_some() {
-                        if let Some(v) = attr_val(&e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                        if let Some(v) = attr_val(&e, b"w:w").and_then(|s| parse_dxa(&s)) {
                             let idx = match e.name().as_ref() {
                                 b"w:top" => 0,
                                 b"w:left" => 1,
@@ -505,6 +589,8 @@ fn realize_run(p: &StyleProps) -> RunStyle {
         size_pt: p.size_pt.unwrap_or(DEFAULT_SIZE_PT),
         color: p.color.unwrap_or([0, 0, 0]),
         font_name: p.font_name.clone(),
+        font_name_east_asia: p.font_name_east_asia.clone(),
+        size_cs_pt: p.size_cs_pt,
     }
 }
 
@@ -571,39 +657,36 @@ impl Numbering {
             self.counters.remove(&(num_id, child_ilvl));
         }
 
+        // Helper: format a counter value according to a NumFmt
+        let fmt_count = |c: u32, fmt: &NumFmt| -> String {
+            match fmt {
+                NumFmt::Decimal => c.to_string(),
+                NumFmt::LowerLetter => format!("{}", (b'a' + ((c as u8).wrapping_sub(1)) % 26) as char),
+                NumFmt::UpperLetter => format!("{}", (b'A' + ((c as u8).wrapping_sub(1)) % 26) as char),
+                NumFmt::LowerRoman => to_roman(c, false),
+                NumFmt::UpperRoman => to_roman(c, true),
+                NumFmt::Bullet | NumFmt::None => c.to_string(),
+            }
+        };
+
         let label = match level.fmt {
             NumFmt::Bullet | NumFmt::None => {
-                // level_text is the actual bullet char
                 let c = level.level_text.trim();
                 if c.is_empty() { "•".to_string() } else { c.to_string() }
             }
-            NumFmt::Decimal => {
+            _ => {
                 let mut t = level.level_text.clone();
-                t = t.replace(&format!("%{}", ilvl + 1), &count.to_string());
-                t
-            }
-            NumFmt::LowerLetter => {
-                let ch = (b'a' + ((count as u8).wrapping_sub(1)) % 26) as char;
-                let mut t = level.level_text.clone();
-                t = t.replace(&format!("%{}", ilvl + 1), &ch.to_string());
-                t
-            }
-            NumFmt::UpperLetter => {
-                let ch = (b'A' + ((count as u8).wrapping_sub(1)) % 26) as char;
-                let mut t = level.level_text.clone();
-                t = t.replace(&format!("%{}", ilvl + 1), &ch.to_string());
-                t
-            }
-            NumFmt::LowerRoman => {
-                let s = to_roman(count, false);
-                let mut t = level.level_text.clone();
-                t = t.replace(&format!("%{}", ilvl + 1), &s);
-                t
-            }
-            NumFmt::UpperRoman => {
-                let s = to_roman(count, true);
-                let mut t = level.level_text.clone();
-                t = t.replace(&format!("%{}", ilvl + 1), &s);
+                // Replace current level placeholder
+                t = t.replace(&format!("%{}", ilvl + 1), &fmt_count(count, &level.fmt));
+                // Replace ALL parent level placeholders (%1..%ilvl)
+                // Needed for compound formats like "%1.%2" (chapter.section)
+                if let Some(levels) = self.abstract_nums.get(&abstract_id) {
+                    for p in 0..(ilvl as usize) {
+                        let pc = self.counters.get(&(num_id, p as u8)).copied().unwrap_or(0);
+                        let pfmt = levels.get(p).map(|l| &l.fmt).unwrap_or(&NumFmt::Decimal);
+                        t = t.replace(&format!("%{}", p + 1), &fmt_count(pc, pfmt));
+                    }
+                }
                 t
             }
         };
@@ -698,10 +781,10 @@ fn parse_numbering_xml(xml: &str) -> Numbering {
                 }
                 b"w:ind" => {
                     if let Some(l) = cur_level.as_mut() {
-                        if let Some(v) = attr_val(&e, b"w:left").and_then(|s| s.parse::<u32>().ok()) {
+                        if let Some(v) = attr_val(&e, b"w:left").and_then(|s| parse_dxa(&s)) {
                             l.indent_left_dxa = v;
                         }
-                        if let Some(v) = attr_val(&e, b"w:hanging").and_then(|s| s.parse::<u32>().ok()) {
+                        if let Some(v) = attr_val(&e, b"w:hanging").and_then(|s| parse_dxa(&s)) {
                             l.hanging_dxa = v;
                         }
                     }
@@ -776,6 +859,14 @@ struct DocParser<'a> {
     // inheritance: a section without its own ref inherits the previous one).
     sect_header_default: Option<String>,
     sect_footer_default: Option<String>,
+    // "first" page type (w:titlePg). Stored separately; used as fallback when
+    // no "default" is declared (some documents only declare "first" type).
+    sect_header_first_pg: Option<String>,
+    sect_footer_first_pg: Option<String>,
+    // All footer/header rIds seen in order — used to find the first one with
+    // actual content (some sections declare empty placeholder footer files).
+    all_footer_default_rids: Vec<String>,
+    all_header_default_rids: Vec<String>,
     // Snapshot of refs at the end of the FIRST section (the cover page section).
     first_sect_header: Option<Option<String>>,
     first_sect_footer: Option<Option<String>>,
@@ -904,7 +995,7 @@ impl<'a> DocParser<'a> {
                     match e.name().as_ref() {
                         // Grid column widths
                         b"w:gridCol" if in_tbl_grid => {
-                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse().ok()) {
+                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa(&s)) {
                                 table.grid_col_widths.push(v);
                             }
                         }
@@ -924,7 +1015,7 @@ impl<'a> DocParser<'a> {
                         }
                         // Table-level cell margins (w:tblCellMar) override the style
                         b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_tbl_cell_mar => {
-                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa(&s)) {
                                 match e.name().as_ref() {
                                     b"w:top" => table.cell_margins.top = v,
                                     b"w:left" => table.cell_margins.left = v,
@@ -936,7 +1027,7 @@ impl<'a> DocParser<'a> {
                         // Per-cell margins (w:tcMar) override the table
                         b"w:top" | b"w:left" | b"w:bottom" | b"w:right" if in_tc_mar => {
                             if let Some(cell) = cur_cell.as_mut() {
-                                if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse::<u32>().ok()) {
+                                if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa(&s)) {
                                     let m = cell.margins.get_or_insert(table.cell_margins);
                                     match e.name().as_ref() {
                                         b"w:top" => m.top = v,
@@ -949,13 +1040,13 @@ impl<'a> DocParser<'a> {
                         }
                         // Table-level properties
                         b"w:tblW" => {
-                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse().ok()) {
+                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa(&s)) {
                                 table.width_dxa = v;
                             }
                             table.width_is_pct = attr_val(e, b"w:type").as_deref() == Some("pct");
                         }
                         b"w:tblInd" => {
-                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse::<i32>().ok()) {
+                            if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa_i32(&s)) {
                                 table.indent_dxa = v;
                             }
                         }
@@ -982,7 +1073,7 @@ impl<'a> DocParser<'a> {
                         // Row height
                         b"w:trHeight" => {
                             if let Some(row) = cur_row.as_mut() {
-                                if let Some(v) = attr_val(e, b"w:val").and_then(|s| s.parse().ok()) {
+                                if let Some(v) = attr_val(e, b"w:val").and_then(|s| parse_dxa(&s)) {
                                     row.height_dxa = v;
                                 }
                                 row.height_exact = attr_val(e, b"w:hRule").as_deref() == Some("exact");
@@ -991,7 +1082,7 @@ impl<'a> DocParser<'a> {
                         // Cell width
                         b"w:tcW" => {
                             if let Some(cell) = cur_cell.as_mut() {
-                                if let Some(v) = attr_val(e, b"w:w").and_then(|s| s.parse().ok()) {
+                                if let Some(v) = attr_val(e, b"w:w").and_then(|s| parse_dxa(&s)) {
                                     cell.width_dxa = v;
                                 }
                             }
@@ -1047,6 +1138,7 @@ impl<'a> DocParser<'a> {
         let mut in_text = false;
         let mut num_id: Option<u32> = None;
         let mut page_break_after = false;
+        let mut in_para_sect_pr = false;
         let mut ilvl: u8 = 0;
 
         // Field (w:fldChar / w:instrText) state for PAGE numbers
@@ -1065,9 +1157,13 @@ impl<'a> DocParser<'a> {
         let mut anchor_pos_y: i64 = 0;
         let mut anchor_ref_h: u8 = 0;
         let mut anchor_ref_v: u8 = 0;
+        let mut anchor_align_h: u8 = 0;
+        let mut anchor_align_v: u8 = 0;
         let mut anchor_behind: bool = false;
         let mut in_pos_h = false;
         let mut in_pos_v = false;
+        let mut in_align_h = false;
+        let mut in_align_v = false;
 
         loop {
             match reader.read_event_into(buf) {
@@ -1081,7 +1177,15 @@ impl<'a> DocParser<'a> {
                             in_instr = true;
                         }
                         b"w:fldChar" => {
-                            handle_fld_char(e, &mut instr, &mut pending_page);
+                            if handle_fld_char(e, &mut instr, &mut pending_page) {
+                                // PAGE field ended without a cached w:t — push placeholder run
+                                para.runs.push(Run {
+                                    text: String::new(),
+                                    style: cur_style.clone(),
+                                    inline_image: None,
+                                    is_page_number: true,
+                                });
+                            }
                         }
                         b"w:drawing" => {
                             in_drawing = true;
@@ -1094,6 +1198,8 @@ impl<'a> DocParser<'a> {
                             anchor_pos_y = 0;
                             anchor_ref_h = 0;
                             anchor_ref_v = 0;
+                            anchor_align_h = 0;
+                            anchor_align_v = 0;
                             anchor_behind = false;
                         }
                         b"wp:anchor" if in_drawing => {
@@ -1113,6 +1219,12 @@ impl<'a> DocParser<'a> {
                                 _ => 0,
                             };
                             draw_depth += 1;
+                        }
+                        b"wp:align" if in_pos_h => {
+                            in_align_h = true;
+                        }
+                        b"wp:align" if in_pos_v => {
+                            in_align_v = true;
                         }
                         b"wp:positionV" if in_drawing => {
                             in_pos_v = true;
@@ -1143,6 +1255,7 @@ impl<'a> DocParser<'a> {
                             draw_depth += 1;
                         }
                         b"w:sectPr" => {
+                            in_para_sect_pr = true;
                             page_break_after = true;
                         }
                         _ => {
@@ -1195,7 +1308,14 @@ impl<'a> DocParser<'a> {
                             }
                         }
                         b"w:fldChar" => {
-                            handle_fld_char(e, &mut instr, &mut pending_page);
+                            if handle_fld_char(e, &mut instr, &mut pending_page) {
+                                para.runs.push(Run {
+                                    text: String::new(),
+                                    style: cur_style.clone(),
+                                    inline_image: None,
+                                    is_page_number: true,
+                                });
+                            }
                         }
                         b"w:headerReference" | b"w:footerReference" => {
                             self.capture_hf_ref(e);
@@ -1241,6 +1361,11 @@ impl<'a> DocParser<'a> {
                                 });
                             }
                         }
+                        b"w:type" if in_para_sect_pr => {
+                            if attr_val(e, b"w:val").as_deref() == Some("continuous") {
+                                page_break_after = false;
+                            }
+                        }
                         _ => {
                             if !in_drawing {
                                 self.handle_para_el(
@@ -1263,6 +1388,26 @@ impl<'a> DocParser<'a> {
                     } else if in_instr {
                         if let Ok(s) = t.unescape() {
                             instr.push_str(&s);
+                        }
+                    } else if in_align_h {
+                        if let Ok(s) = t.unescape() {
+                            anchor_align_h = match s.trim() {
+                                "center" => 1,
+                                "right" => 2,
+                                "left" => 3,
+                                "inside" => 3,
+                                "outside" => 2,
+                                _ => 0,
+                            };
+                        }
+                    } else if in_align_v {
+                        if let Ok(s) = t.unescape() {
+                            anchor_align_v = match s.trim() {
+                                "center" => 1,
+                                "bottom" => 2,
+                                "top" => 3,
+                                _ => 0,
+                            };
                         }
                     } else if in_pos_h {
                         if let Ok(s) = t.unescape() {
@@ -1302,7 +1447,12 @@ impl<'a> DocParser<'a> {
                         in_instr = false;
                     }
                     b"w:sectPr" => {
+                        in_para_sect_pr = false;
                         self.end_sect();
+                    }
+                    b"wp:align" => {
+                        in_align_h = false;
+                        in_align_v = false;
                     }
                     b"wp:positionH" => {
                         in_pos_h = false;
@@ -1327,6 +1477,8 @@ impl<'a> DocParser<'a> {
                                         pos_y_emu: anchor_pos_y,
                                         pos_ref_h: anchor_ref_h,
                                         pos_ref_v: anchor_ref_v,
+                                        align_h: anchor_align_h,
+                                        align_v: anchor_align_v,
                                         behind_doc: anchor_behind,
                                     });
                                 }
@@ -1354,8 +1506,16 @@ impl<'a> DocParser<'a> {
                         }
                         para.space_before_pt = para_props.space_before_pt.unwrap_or(0.0);
                         para.space_after_pt = para_props.space_after_pt.unwrap_or(0.0);
+                        para.space_before_lines = para_props.space_before_lines;
+                        para.space_after_lines = para_props.space_after_lines;
                         if let Some(v) = para_props.line_pct {
                             para.line_pct = v;
+                        }
+                        if let Some(v) = para_props.line_height_exact_pt {
+                            para.line_height_exact_pt = Some(v);
+                        }
+                        if let Some(v) = para_props.line_height_atleast_pt {
+                            para.line_height_atleast_pt = Some(v);
                         }
                         if para.outline_level.is_none() {
                             para.outline_level = para_props.outline_level;
@@ -1467,6 +1627,16 @@ impl<'a> DocParser<'a> {
                     cur_style.font_name = name.clone();
                     run_base.font_name = name;
                 }
+                if let Some(ea) = attr_val(e, b"w:eastAsia") {
+                    cur_style.font_name_east_asia = Some(ea.clone());
+                    run_base.font_name_east_asia = Some(ea);
+                }
+            }
+            b"w:szCs" => {
+                if let Some(v) = attr_val(e, b"w:val").and_then(|s| s.parse::<f32>().ok()) {
+                    cur_style.size_cs_pt = Some(v / 2.0);
+                    run_base.size_cs_pt = Some(v / 2.0);
+                }
             }
             b"w:jc" => {
                 if let Some(v) = attr_val(e, b"w:val") {
@@ -1486,16 +1656,28 @@ impl<'a> DocParser<'a> {
         }
     }
 
-    /// Capture a header/footer reference from a sectPr (only the "default" type).
+    /// Capture a header/footer reference from a sectPr.
+    /// Handles "default" and "first" types; ignores "even" (not implemented).
     fn capture_hf_ref(&mut self, e: &BytesStart) {
-        if attr_val(e, b"w:type").as_deref() != Some("default") {
-            return;
-        }
+        let hf_type = attr_val(e, b"w:type");
         if let Some(rid) = attr_val(e, b"r:id") {
-            if e.name().as_ref() == b"w:headerReference" {
-                self.sect_header_default = Some(rid);
-            } else {
-                self.sect_footer_default = Some(rid);
+            let is_header = e.name().as_ref() == b"w:headerReference";
+            match hf_type.as_deref() {
+                Some("first") => {
+                    if is_header { self.sect_header_first_pg = Some(rid); }
+                    else         { self.sect_footer_first_pg = Some(rid); }
+                }
+                // "default" or missing type = default page header/footer
+                Some("default") | None => {
+                    if is_header {
+                        self.sect_header_default = Some(rid.clone());
+                        self.all_header_default_rids.push(rid);
+                    } else {
+                        self.sect_footer_default = Some(rid.clone());
+                        self.all_footer_default_rids.push(rid);
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -1529,8 +1711,14 @@ impl<'a> DocParser<'a> {
     fn end_sect(&mut self) {
         self.sect_count += 1;
         if self.sect_count == 1 {
-            self.first_sect_header = Some(self.sect_header_default.clone());
-            self.first_sect_footer = Some(self.sect_footer_default.clone());
+            // For the first section snapshot: prefer "default"; fall back to "first"
+            // when a document only declares first-page-different refs (w:titlePg only).
+            let hdr = self.sect_header_default.clone()
+                .or_else(|| self.sect_header_first_pg.clone());
+            let ftr = self.sect_footer_default.clone()
+                .or_else(|| self.sect_footer_first_pg.clone());
+            self.first_sect_header = Some(hdr);
+            self.first_sect_footer = Some(ftr);
         }
     }
 
@@ -1598,6 +1786,17 @@ impl IntoProps for RunStyle {
     }
 }
 
+// ── helper: check if a parsed header/footer has meaningful content ─────────────
+
+fn hf_has_content(hf: &crate::model::HeaderFooter) -> bool {
+    use crate::model::Block;
+    hf.blocks.iter().any(|b| match b {
+        Block::Paragraph(p) => p.runs.iter().any(|r| !r.text.is_empty() || r.is_page_number),
+        Block::Table(_) => true,
+        _ => false,
+    })
+}
+
 // ── public entry point ────────────────────────────────────────────────────────
 
 pub fn parse(bytes: &[u8]) -> Result<Document, String> {
@@ -1642,6 +1841,10 @@ pub fn parse(bytes: &[u8]) -> Result<Document, String> {
         margin_b: DEFAULT_MARGIN_PT,
         sect_header_default: None,
         sect_footer_default: None,
+        sect_header_first_pg: None,
+        sect_footer_first_pg: None,
+        all_footer_default_rids: Vec::new(),
+        all_header_default_rids: Vec::new(),
         first_sect_header: None,
         first_sect_footer: None,
         sect_count: 0,
@@ -1654,12 +1857,42 @@ pub fn parse(bytes: &[u8]) -> Result<Document, String> {
     let blocks = parser.parse_body(&xml);
 
     // Parse header/footer parts now that section refs are known.
-    let hdr_rid = parser.sect_header_default.clone();
-    let ftr_rid = parser.sect_footer_default.clone();
+    // Fall back to "first" type when no "default" is declared.
+    // For "main" header/footer (used on all pages except cover), scan all
+    // collected rIds from first to last and use the first one whose parsed
+    // content is meaningful (has runs or tables). This handles multi-section
+    // documents where later sections may declare empty placeholder files.
     let hdr_first_rid = parser.first_sect_header.clone().flatten();
     let ftr_first_rid = parser.first_sect_footer.clone().flatten();
-    let header = parser.parse_hf_by_rid(hdr_rid.as_ref());
-    let footer = parser.parse_hf_by_rid(ftr_rid.as_ref());
+
+    let all_ftr_rids = parser.all_footer_default_rids.clone();
+    let all_hdr_rids = parser.all_header_default_rids.clone();
+
+    let footer = {
+        let candidate = all_ftr_rids.iter().find_map(|rid| {
+            let hf = parser.parse_hf_by_rid(Some(rid))?;
+            if hf_has_content(&hf) { Some(hf) } else { None }
+        });
+        // fallback: single-section docs / "first" only docs
+        candidate.or_else(|| {
+            let rid = parser.sect_footer_default.clone()
+                .or_else(|| parser.sect_footer_first_pg.clone());
+            parser.parse_hf_by_rid(rid.as_ref())
+        })
+    };
+
+    let header = {
+        let candidate = all_hdr_rids.iter().find_map(|rid| {
+            let hf = parser.parse_hf_by_rid(Some(rid))?;
+            if hf_has_content(&hf) { Some(hf) } else { None }
+        });
+        candidate.or_else(|| {
+            let rid = parser.sect_header_default.clone()
+                .or_else(|| parser.sect_header_first_pg.clone());
+            parser.parse_hf_by_rid(rid.as_ref())
+        })
+    };
+
     let header_first = parser.parse_hf_by_rid(hdr_first_rid.as_ref());
     let footer_first = parser.parse_hf_by_rid(ftr_first_rid.as_ref());
 

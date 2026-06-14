@@ -56,6 +56,7 @@ import type {
 } from "../wasm/anicca-engine.js";
 
 import { WORKER_INLINE } from "./worker-inline.js";
+import { resolveFonts } from "../fontResolver.js";
 
 export type {
     Annotation,
@@ -408,6 +409,16 @@ export class WorkerClient {
      * @returns The document ID.
      */
     async loadDocx(bytes: Uint8Array): Promise<string> {
+        // Prefetch fonts declared in this document before rendering
+        try {
+            const declaredFonts = await this.getDeclaredFonts(bytes);
+            const fontDataList = await resolveFonts(declaredFonts);
+            for (const fontData of fontDataList) {
+                await this.registerFontData(fontData);
+            }
+        } catch {
+            // Font prefetch failure is non-fatal - render with bundled fonts
+        }
         const response = (await this.send({
             type: "loadDocx",
             id: "", // Not used, will be assigned by worker
@@ -845,6 +856,23 @@ export class WorkerClient {
      */
     async registerFonts(fonts: FontEntry[]): Promise<void> {
         await this.send({ type: "registerFonts", fonts });
+    }
+
+    /**
+     * Register a font from raw bytes (TTF/OTF/WOFF2).
+     * Call before loadDocx() for best results.
+     */
+    async registerFontData(bytes: Uint8Array): Promise<void> {
+        await this.send({ type: "registerFontData", bytes });
+    }
+
+    /**
+     * Get font family names declared in a DOCX document.
+     * Use to prefetch fonts before calling loadDocx().
+     */
+    async getDeclaredFonts(bytes: Uint8Array): Promise<string[]> {
+        const response = (await this.send({ type: "getDeclaredFonts", bytes })) as { fonts: string[] };
+        return response.fonts;
     }
 
     /**

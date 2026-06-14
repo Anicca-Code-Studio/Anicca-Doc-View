@@ -317,13 +317,13 @@ export class Wasm {
     }
     /**
      * @param {string} document_id
-     * @param {number} _page_index
+     * @param {number} page_index
      * @returns {any}
      */
-    get_layout_page(document_id, _page_index) {
+    get_layout_page(document_id, page_index) {
         const ptr0 = passStringToWasm0(document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasm_get_layout_page(this.__wbg_ptr, ptr0, len0, _page_index);
+        const ret = wasm.wasm_get_layout_page(this.__wbg_ptr, ptr0, len0, page_index);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -340,16 +340,16 @@ export class Wasm {
         return ret !== 0;
     }
     /**
-     * @param {string} _document_id
-     * @param {number} _page_index
-     * @param {number} _width
-     * @param {number} _height
+     * @param {string} document_id
+     * @param {number} page_index
+     * @param {number} width
+     * @param {number} height
      * @returns {Uint8Array}
      */
-    render_page_gpu(_document_id, _page_index, _width, _height) {
-        const ptr0 = passStringToWasm0(_document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    render_page_gpu(document_id, page_index, width, height) {
+        const ptr0 = passStringToWasm0(document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasm_render_page_gpu(this.__wbg_ptr, ptr0, len0, _page_index, _width, _height);
+        const ret = wasm.wasm_render_page_gpu(this.__wbg_ptr, ptr0, len0, page_index, width, height);
         if (ret[3]) {
             throw takeFromExternrefTable0(ret[2]);
         }
@@ -386,6 +386,21 @@ export class Wasm {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
+     * Return the list of font family names declared in a DOCX document.
+     * JS can use this to prefetch fonts before calling load().
+     * @param {Uint8Array} bytes
+     * @returns {any}
+     */
+    getDeclaredFonts(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasm_getDeclaredFonts(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * @param {string} _document_id
      * @param {boolean} _convert
      * @returns {any}
@@ -398,6 +413,16 @@ export class Wasm {
             throw takeFromExternrefTable0(ret[1]);
         }
         return takeFromExternrefTable0(ret[0]);
+    }
+    /**
+     * Register a font from raw bytes. Call before load() for best results.
+     * Accepts TTF/OTF/WOFF2 bytes fetched from any source (Google Fonts, custom URL, etc).
+     * @param {Uint8Array} bytes
+     */
+    registerFontData(bytes) {
+        const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasm_registerFontData(this.__wbg_ptr, ptr0, len0);
     }
     enableGoogleFonts() {
         wasm.wasm_enableGoogleFonts(this.__wbg_ptr);

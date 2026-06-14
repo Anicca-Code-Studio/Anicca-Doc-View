@@ -6,6 +6,7 @@ use cosmic_text::{
     Align as CtAlign, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style,
     SwashCache, SwashContent, Weight,
 };
+use serde::Serialize;
 
 use crate::model::{Align, AnchorImage, Block, BorderStyle, Document, ImageFormat, Paragraph, Table, TabAlign, TabLeader};
 
@@ -41,11 +42,19 @@ pub fn new_font_system() -> FontSystem {
     db.load_font_data(include_bytes!("../fonts/Carlito-Bold.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/Carlito-Italic.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/Carlito-BoldItalic.ttf").to_vec());
-    // DejaVu Sans: wide Unicode coverage, last-resort only.
+    // DejaVu Sans: wide Unicode coverage (Latin Extended, Cyrillic, Greek), last-resort only.
     db.load_font_data(include_bytes!("../fonts/DejaVuSans.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/DejaVuSans-Bold.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/DejaVuSans-Oblique.ttf").to_vec());
     db.load_font_data(include_bytes!("../fonts/DejaVuSans-BoldOblique.ttf").to_vec());
+    // Noto fonts: multilingual fallback coverage.
+    // Japanese (hiragana, katakana, kanji), Arabic, Hebrew, Thai, Devanagari (Hindi).
+    // cosmic_text auto-selects these when a glyph is missing from the primary font.
+    db.load_font_data(include_bytes!("../fonts/NotoSansJP-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/NotoSansArabic-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/NotoSansHebrew-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/NotoSansThai-Regular.ttf").to_vec());
+    db.load_font_data(include_bytes!("../fonts/NotoSansDevanagari-Regular.ttf").to_vec());
     db.set_sans_serif_family("Liberation Sans");
     db.set_serif_family("Liberation Serif");
     let fs = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
@@ -146,12 +155,7 @@ fn page_of(y: f32, page_h: f32) -> usize {
 /// Lays out one paragraph. `width_px` is the available content width in pixels.
 /// Returns the laid-out Buffer.
 fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale: f32) -> Buffer {
-    let has_text = para
-        .runs
-        .iter()
-        .any(|r| r.inline_image.is_none() && !r.text.is_empty());
-    // Empty paragraphs take the height of their paragraph mark (w:sz on pPr>rPr).
-    let base_pt = if has_text { 11.0 } else { para.mark_style.size_pt };
+    let base_pt = para.mark_style.size_pt;
     let max_pt = para
         .runs
         .iter()
@@ -159,7 +163,19 @@ fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale:
         .map(|r| r.style.size_pt)
         .fold(base_pt, f32::max);
     let font_px = (max_pt * scale).max(1.0);
-    let line_px = (font_px * LINE_FACTOR * para.line_pct.max(0.5)).max(1.0);
+    let line_px = if let Some(exact_pt) = para.line_height_exact_pt {
+        // w:lineRule="exact": absolute line height, ignore LINE_FACTOR and line_pct
+        (exact_pt * scale).max(1.0)
+    } else {
+        let factor = LINE_FACTOR.max(para.line_pct.max(0.5));
+        let natural = (font_px * factor).max(1.0);
+        if let Some(atleast_pt) = para.line_height_atleast_pt {
+            // w:lineRule="atLeast": natural height or minimum, whichever is larger
+            natural.max(atleast_pt * scale)
+        } else {
+            natural
+        }
+    };
 
     let mut buffer = Buffer::new(fs, Metrics::new(font_px, line_px));
     buffer.set_size(fs, Some(width_px.max(1.0)), None);
@@ -183,7 +199,7 @@ fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale:
         if run.inline_image.is_some() || run.text.is_empty() {
             continue;
         }
-        spans.push((run.text.as_str(), run_attrs(&run.style, scale)));
+        spans.push((run.text.as_str(), run_attrs_for(&run.style, run.text.as_str(), scale)));
     }
 
     if spans.is_empty() {
@@ -204,9 +220,38 @@ fn layout_paragraph(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale:
     buffer
 }
 
-fn run_attrs<'a>(style: &'a crate::model::RunStyle, scale: f32) -> Attrs<'a> {
-    let sz = (style.size_pt * scale).max(1.0);
-    let family = if let Some(ref name) = style.font_name {
+fn is_cjk_dominant(s: &str) -> bool {
+    let mut cjk = 0u32;
+    let mut total = 0u32;
+    for c in s.chars() {
+        total += 1;
+        if matches!(c,
+            '\u{3000}'..='\u{9FFF}' |
+            '\u{F900}'..='\u{FAFF}' |
+            '\u{AC00}'..='\u{D7FF}' |
+            '\u{20000}'..='\u{2FA1F}'
+        ) {
+            cjk += 1;
+        }
+    }
+    total > 0 && cjk * 2 >= total
+}
+
+fn run_attrs_for<'a>(style: &'a crate::model::RunStyle, text: &str, scale: f32) -> Attrs<'a> {
+    let sz = if style.size_cs_pt.is_some() && is_complex_script(text) {
+        (style.size_cs_pt.unwrap() * scale).max(1.0)
+    } else {
+        (style.size_pt * scale).max(1.0)
+    };
+    let family = if is_cjk_dominant(text) {
+        if let Some(ref ea) = style.font_name_east_asia {
+            resolve_family(ea.as_str())
+        } else if let Some(ref name) = style.font_name {
+            resolve_family(name.as_str())
+        } else {
+            Family::SansSerif
+        }
+    } else if let Some(ref name) = style.font_name {
         resolve_family(name.as_str())
     } else {
         Family::SansSerif
@@ -224,9 +269,58 @@ fn run_attrs<'a>(style: &'a crate::model::RunStyle, scale: f32) -> Attrs<'a> {
     a
 }
 
+fn is_complex_script(s: &str) -> bool {
+    s.chars().any(|c| matches!(c,
+        '\u{0600}'..='\u{06FF}' |   // Arabic
+        '\u{0590}'..='\u{05FF}' |   // Hebrew
+        '\u{0900}'..='\u{097F}' |   // Devanagari
+        '\u{0E00}'..='\u{0E7F}'     // Thai
+    ))
+}
+
+fn run_attrs<'a>(style: &'a crate::model::RunStyle, scale: f32) -> Attrs<'a> {
+    run_attrs_for(style, "", scale)
+}
+
 fn buffer_height(buffer: &Buffer) -> f32 {
     let lh = buffer.metrics().line_height;
     buffer.layout_runs().count() as f32 * lh
+}
+
+/// Compute effective line height for a paragraph in points (scale=1.0).
+fn para_line_height_pt(para: &Paragraph) -> f32 {
+    let base_pt = para.mark_style.size_pt;
+    let max_pt = para.runs.iter().filter(|r| r.inline_image.is_none())
+        .map(|r| r.style.size_pt).fold(base_pt, f32::max);
+    if let Some(exact_pt) = para.line_height_exact_pt {
+        exact_pt
+    } else {
+        let factor = LINE_FACTOR.max(para.line_pct.max(0.5));
+        let natural = max_pt * factor;
+        if let Some(atleast_pt) = para.line_height_atleast_pt {
+            natural.max(atleast_pt)
+        } else {
+            natural
+        }
+    }
+}
+
+/// Space before paragraph in pixels, resolving beforeLines if set.
+fn para_space_before(para: &Paragraph, scale: f32) -> f32 {
+    if let Some(lines) = para.space_before_lines {
+        lines * para_line_height_pt(para) * scale
+    } else {
+        para.space_before_pt * scale
+    }
+}
+
+/// Space after paragraph in pixels, resolving afterLines if set.
+fn para_space_after(para: &Paragraph, scale: f32) -> f32 {
+    if let Some(lines) = para.space_after_lines {
+        lines * para_line_height_pt(para) * scale
+    } else {
+        para.space_after_pt * scale
+    }
 }
 
 /// Measure width of a text string using the given run style.
@@ -311,22 +405,45 @@ fn col_widths(table: &Table, content_w_px: f32, scale: f32) -> Vec<f32> {
     }
     let tbl_px = table_px(table, content_w_px, scale);
 
-    // Prefer tblGrid as authoritative column widths
+    // Actual grid columns used = max sum-of-gridSpan across all rows.
+    // This is the ground truth for how many col_ws entries cells will index into.
+    let max_grid_used = table.rows.iter()
+        .map(|r| r.cells.iter().map(|c| c.grid_span.max(1) as usize).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+
+    // Prefer tblGrid as authoritative column widths.
     if !table.grid_col_widths.is_empty() {
-        let total_dxa: u32 = table.grid_col_widths.iter().sum();
+        let cols = &table.grid_col_widths;
+        // LibreOffice/Word export bug: some tools emit the same N columns twice.
+        // Detect ONLY when: count is exactly 2x actual grid usage AND halves are identical.
+        // This avoids misidentifying legitimate equal-width tables (e.g. [3000, 3000]).
+        let effective: &[u32] = {
+            let n = cols.len();
+            let h = n / 2;
+            if n % 2 == 0 && h == max_grid_used && h > 0 && cols[..h] == cols[h..] {
+                &cols[..h]
+            } else {
+                cols
+            }
+        };
+        let total_dxa: u32 = effective.iter().sum();
         if total_dxa > 0 {
-            return table.grid_col_widths.iter()
+            return effective.iter()
                 .map(|&w| tbl_px * w as f32 / total_dxa as f32)
                 .collect();
         }
     }
 
-    // Fall back to cell widths from first fully-specified row
-    let ncols = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+    // Fall back to cell widths from first fully-specified row.
+    // ncols from gridSpan sums (not physical cell count) to handle merged-cell rows.
+    let ncols = max_grid_used;
     if ncols == 0 {
         return Vec::new();
     }
-    let ref_row = table.rows.iter().find(|r| r.cells.len() == ncols);
+    let ref_row = table.rows.iter().find(|r| {
+        r.cells.iter().map(|c| c.grid_span.max(1) as usize).sum::<usize>() == ncols
+    });
     if let Some(row) = ref_row {
         let total_dxa: u32 = row.cells.iter().map(|c| c.width_dxa).sum();
         if total_dxa > 0 {
@@ -369,9 +486,9 @@ fn row_height(
         for block in &cell.blocks {
             match block {
                 Block::Paragraph(p) => {
-                    cell_h += p.space_before_pt * scale;
+                    cell_h += para_space_before(p, scale);
                     cell_h += para_height(fs, p, inner_w, scale);
-                    cell_h += p.space_after_pt * scale;
+                    cell_h += para_space_after(p, scale);
                 }
                 Block::Table(t) => {
                     cell_h += table_height(fs, t, inner_w, scale);
@@ -434,7 +551,7 @@ pub fn measure(fs: &mut FontSystem, doc: &Document) -> (usize, Vec<usize>) {
         block_pages.push(start_page);
         match block {
             Block::Paragraph(p) => {
-                cursor += p.space_before_pt;
+                cursor += para_space_before(p, 1.0);
                 let eff_w = para_content_w(p, content_w, 1.0);
                 // Inline images that don't fit the remaining page move to the
                 // next page (mirrored in render_page).
@@ -453,7 +570,7 @@ pub fn measure(fs: &mut FontSystem, doc: &Document) -> (usize, Vec<usize>) {
                 }
                 let buf = layout_paragraph(fs, p, eff_w, 1.0);
                 cursor += buffer_height(&buf).max(1.0);
-                cursor += p.space_after_pt;
+                cursor += para_space_after(p, 1.0);
             }
             Block::Table(t) => {
                 cursor += table_height(fs, t, content_w, 1.0);
@@ -532,7 +649,7 @@ pub fn render_page(
             Block::Paragraph(para) => {
                 let cursor_before_para = cursor;
                 let abs_y_before = cursor;
-                cursor += para.space_before_pt * scale;
+                cursor += para_space_before(para, scale);
 
                 let indent_l_px = para.indent_left_pt * scale;
                 let indent_r_px = para.indent_right_pt * scale;
@@ -557,7 +674,11 @@ pub fn render_page(
                         let abs_y = cursor;
                         let page_local_y = abs_y - page_top;
                         let render_y = margin_t_px + page_local_y;
-                        let render_x = eff_content_x;
+                        let render_x = match para.align {
+                            Align::Center => eff_content_x + (eff_content_w - img_w as f32) / 2.0,
+                            Align::Right => eff_content_x + eff_content_w - img_w as f32,
+                            _ => eff_content_x,
+                        };
 
                         let on_this_page = abs_y >= page_top - img_h as f32
                             && abs_y < page_top + content_h_px;
@@ -632,7 +753,14 @@ pub fn render_page(
                     let line_pg = page_of(line_abs_top, content_h_px);
 
                     if line_pg == page {
-                        let baseline = margin_t_px + (cursor + lh * 0.85 - page_top);
+                        let actual_line_y = {
+                            let mut tmp = Buffer::new(fs, Metrics::new(font_px, lh));
+                            tmp.set_size(fs, Some(font_px * 2.0), None);
+                            tmp.set_text(fs, "X", run_attrs(&def_style, scale), Shaping::Advanced);
+                            tmp.shape_until_scroll(fs, false);
+                            tmp.layout_runs().next().map(|r| r.line_y).unwrap_or(lh * 0.85)
+                        };
+                        let baseline = margin_t_px + (cursor + actual_line_y - page_top);
 
                         // Render left text: each part rendered consecutively (track x)
                         let mut left_cur_x = eff_content_x;
@@ -726,7 +854,7 @@ pub fn render_page(
                     scale,
                 );
 
-                cursor += para.space_after_pt * scale;
+                cursor += para_space_after(para, scale);
                 let _ = abs_y_before;
             }
             Block::Table(table) => {
@@ -791,15 +919,40 @@ fn render_anchor_images(
         }
 
         let x_pt = anchor.pos_x_emu as f64 / EMU_PER_PT;
-        let render_x = match anchor.pos_ref_h {
-            1 => x_pt as f32 * scale,               // page-relative: from page left edge
-            _ => margin_l_px + x_pt as f32 * scale, // column-relative (default)
+        let render_x = if anchor.align_h == 1 {
+            // center: relative to reference area
+            let area_w = match anchor.pos_ref_h {
+                1 => out_w as f32,              // page width
+                _ => out_w as f32 - margin_l_px * 2.0, // content/column width
+            };
+            let x_origin = if anchor.pos_ref_h == 1 { 0.0 } else { margin_l_px };
+            x_origin + (area_w - img_w as f32) / 2.0
+        } else if anchor.align_h == 2 {
+            // right
+            let area_w = match anchor.pos_ref_h {
+                1 => out_w as f32,
+                _ => out_w as f32 - margin_l_px * 2.0,
+            };
+            let x_origin = if anchor.pos_ref_h == 1 { 0.0 } else { margin_l_px };
+            x_origin + area_w - img_w as f32
+        } else {
+            match anchor.pos_ref_h {
+                1 => x_pt as f32 * scale,               // page-relative: from page left edge
+                _ => margin_l_px + x_pt as f32 * scale, // column-relative (default)
+            }
         };
 
         let y_pt = anchor.pos_y_emu as f64 / EMU_PER_PT;
-        let abs_y = match anchor.pos_ref_v {
-            1 => y_pt as f32 * scale,                       // page-relative
-            _ => cursor_before_para + y_pt as f32 * scale,  // paragraph-relative
+        let abs_y = if anchor.align_v == 1 {
+            // center vertically on page
+            let page_h = content_h_px;
+            let page_top_abs = page as f32 * page_h;
+            page_top_abs + (page_h - img_h as f32) / 2.0
+        } else {
+            match anchor.pos_ref_v {
+                1 => y_pt as f32 * scale,                       // page-relative
+                _ => cursor_before_para + y_pt as f32 * scale,  // paragraph-relative
+            }
         };
         let page_local_y = abs_y - page_top;
         let render_y = margin_t_px + page_local_y;
@@ -817,9 +970,9 @@ fn measure_hf_height(fs: &mut FontSystem, blocks: &[Block], content_w_px: f32, s
     for block in blocks {
         match block {
             Block::Paragraph(p) => {
-                h += p.space_before_pt * scale;
+                h += para_space_before(p, scale);
                 h += para_height(fs, p, para_content_w(p, content_w_px, scale), scale);
-                h += p.space_after_pt * scale;
+                h += para_space_after(p, scale);
             }
             Block::Table(t) => {
                 h += table_height(fs, t, content_w_px, scale);
@@ -1050,12 +1203,12 @@ fn render_hf_blocks(
                 y += cursor;
             }
             Block::Paragraph(para) => {
-                y += para.space_before_pt * scale;
+                y += para_space_before(para, scale);
                 y += render_hf_paragraph(
                     fs, swash, rgba, out_w, out_h, para,
                     margin_l_px, y, content_w_px, scale, page_number,
                 );
-                y += para.space_after_pt * scale;
+                y += para_space_after(para, scale);
             }
             Block::PageBreak => {}
         }
@@ -1183,7 +1336,7 @@ fn render_cell_blocks(
     for block in blocks {
         match block {
             Block::Paragraph(p) => {
-                *cur_abs += p.space_before_pt * scale;
+                *cur_abs += para_space_before(p, scale);
 
                 let indent_l = p.indent_left_pt * scale;
                 let eff_x = inner_x + indent_l;
@@ -1227,7 +1380,7 @@ fn render_cell_blocks(
                     }
                 }
                 *cur_abs += run_count as f32 * lh;
-                *cur_abs += p.space_after_pt * scale;
+                *cur_abs += para_space_after(p, scale);
             }
             Block::Table(nested) => {
                 render_table(
@@ -1417,5 +1570,403 @@ fn put(rgba: &mut [u8], w: usize, h: usize, x: i32, y: i32, r: u8, g: u8, b: u8,
         rgba[idx + 1] = (g as f32 * af + rgba[idx + 1] as f32 * inv) as u8;
         rgba[idx + 2] = (b as f32 * af + rgba[idx + 2] as f32 * inv) as u8;
         rgba[idx + 3] = 255;
+    }
+}
+
+// ── layout page structs ───────────────────────────────────────────────────────
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct LpTransform {
+    pub scale_x: f32, pub skew_y: f32, pub skew_x: f32, pub scale_y: f32,
+    pub translate_x: f32, pub translate_y: f32,
+}
+impl LpTransform {
+    pub fn identity() -> Self {
+        LpTransform { scale_x: 1.0, skew_y: 0.0, skew_x: 0.0, scale_y: 1.0, translate_x: 0.0, translate_y: 0.0 }
+    }
+}
+
+#[derive(Serialize)]
+pub struct LpGlyph { pub x: f32, pub y: f32, pub advance: f32, pub offset: usize }
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub enum LpRunContent {
+    #[serde(rename = "glyphs")]
+    Glyphs {
+        text: String,
+        #[serde(rename = "fontSize")] font_size: f32,
+        ascent: f32, descent: f32,
+        glyphs: Vec<LpGlyph>,
+    },
+    #[serde(rename = "space")]
+    Space { advance: f32, #[serde(rename = "fontSize")] font_size: f32, ascent: f32, descent: f32 },
+    #[serde(rename = "tab")]
+    Tab { advance: f32, #[serde(rename = "fontSize")] font_size: f32, ascent: f32, descent: f32 },
+    #[serde(rename = "paragraphEnd")]
+    ParagraphEnd { advance: f32 },
+    #[serde(rename = "break")]
+    Break,
+    #[serde(rename = "inlineDrawing")]
+    InlineDrawing { width: f32, height: f32 },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpRun { pub x: f32, pub width: f32, pub transform: LpTransform, pub content: LpRunContent }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpRunList { pub baseline: f32, pub width: f32, pub height: f32, pub runs: Vec<LpRun> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpTableColumn { pub x: f32, pub width: f32 }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpTableCell {
+    pub col_index: usize, pub col_span: usize, pub row_span: usize,
+    pub x: f32, pub y: f32, pub width: f32, pub height: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parcel: Option<LpParcel>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpTableRow { pub y: f32, pub height: f32, pub cells: Vec<LpTableCell> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpTable {
+    pub width: f32, pub height: f32,
+    pub columns: Vec<LpTableColumn>, pub rows: Vec<LpTableRow>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub enum LpLineContent {
+    #[serde(rename = "runList")]
+    RunList(LpRunList),
+    #[serde(rename = "table")]
+    Table(LpTable),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpLine {
+    pub y: f32, pub width: f32, pub height: f32,
+    pub space_before: f32, pub space_after: f32,
+    pub is_first_line_of_para: bool, pub is_last_line_of_para: bool,
+    pub content: LpLineContent,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpParcel { pub x: f32, pub y: f32, pub width: f32, pub height: f32, pub lines: Vec<LpLine> }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpFrame { pub transform: LpTransform, pub parcel: LpParcel }
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LpPage { pub width: f32, pub height: f32, pub frames: Vec<LpFrame> }
+
+// ── layout_page: extract text positions for text layer ────────────────────────
+
+pub fn layout_page(fs: &mut FontSystem, doc: &Document, page_idx: usize) -> LpPage {
+    // Fixed 2px-per-point scale for sub-point glyph precision; output converted back to points.
+    // Not tied to any canvas size — same result regardless of viewer zoom or page size.
+    let scale = 2.0_f32;
+    let inv = 0.5_f32;
+    let margin_l_px = doc.margin_l_pt * scale;
+    let content_w_px = doc.content_w_pt() * scale;
+    let (margin_t_px, content_h_px) = body_metrics(fs, doc, scale);
+    let page_top = page_idx as f32 * content_h_px;
+
+    let mut lines: Vec<LpLine> = Vec::new();
+    let mut cursor = 0.0f32;
+
+    for block in &doc.blocks {
+        let block_page = page_of(cursor, content_h_px);
+        if block_page > page_idx + 1 { break; }
+
+        match block {
+            Block::PageBreak => {
+                cursor = (page_of(cursor, content_h_px) + 1) as f32 * content_h_px;
+            }
+            Block::Paragraph(para) => {
+                cursor += para_space_before(para, scale);
+                let indent_l = para.indent_left_pt * scale;
+                let first_line_indent = para.indent_first_line_pt * scale;
+                let indent_r = para.indent_right_pt * scale;
+                let hanging = para.list_hanging_pt * scale;
+                let eff_w = (content_w_px - indent_l - indent_r).max(1.0);
+                let eff_x = margin_l_px + indent_l;
+
+                // Advance cursor for inline images (same logic as render_page)
+                for run in &para.runs {
+                    if let Some(ref img) = run.inline_image {
+                        let ih = (img.height_emu as f64 / EMU_PER_PT) as f32 * scale;
+                        if ih >= 1.0 {
+                            let local = cursor - page_of(cursor, content_h_px) as f32 * content_h_px;
+                            if local + ih > content_h_px && ih <= content_h_px {
+                                cursor = (page_of(cursor, content_h_px) + 1) as f32 * content_h_px;
+                            }
+                            cursor += ih;
+                        }
+                    }
+                }
+
+                let _ = (first_line_indent, hanging); // used for positioning in render_page
+                let buf = layout_paragraph(fs, para, eff_w, scale);
+                let lh = buf.metrics().line_height;
+                let all_runs: Vec<_> = buf.layout_runs().collect();
+                let n = all_runs.len();
+
+                for (li, lr) in all_runs.iter().enumerate() {
+                    let line_abs_top = cursor + lr.line_top;
+                    if page_of(line_abs_top, content_h_px) != page_idx { continue; }
+
+                    let line_page_y = margin_t_px + (line_abs_top - page_top);
+                    let baseline_offset = lr.line_y - lr.line_top;
+
+                    let font_sz_px = lr.glyphs.first().map(|g| g.font_size)
+                        .unwrap_or(para.mark_style.size_pt * scale);
+                    let font_sz_pt = font_sz_px * inv;
+                    let ascent_px = lr.line_y - lr.line_top;
+                    let descent_px = lh - ascent_px;
+
+                    let glyphs: Vec<LpGlyph> = lr.glyphs.iter().map(|g| LpGlyph {
+                        x: g.x * inv,
+                        y: 0.0,
+                        advance: g.w * inv,
+                        offset: g.start,
+                    }).collect();
+
+                    let lp_run = LpRun {
+                        x: eff_x * inv,
+                        width: lr.line_w * inv,
+                        transform: LpTransform::identity(),
+                        content: LpRunContent::Glyphs {
+                            text: lr.text.to_string(),
+                            font_size: font_sz_pt,
+                            ascent: ascent_px * inv,
+                            descent: descent_px * inv,
+                            glyphs,
+                        },
+                    };
+
+                    lines.push(LpLine {
+                        y: line_page_y * inv,
+                        width: lr.line_w * inv,
+                        height: lh * inv,
+                        space_before: 0.0,
+                        space_after: 0.0,
+                        is_first_line_of_para: li == 0,
+                        is_last_line_of_para: li + 1 == n,
+                        content: LpLineContent::RunList(LpRunList {
+                            baseline: baseline_offset * inv,
+                            width: lr.line_w * inv,
+                            height: lh * inv,
+                            runs: vec![lp_run],
+                        }),
+                    });
+                }
+
+                cursor += n as f32 * lh;
+                cursor += para_space_after(para, scale);
+            }
+            Block::Table(table) => {
+                if let Some(tbl_line) = lp_table_line(fs, table, &mut cursor, page_idx,
+                    content_h_px, page_top, margin_l_px, margin_t_px, content_w_px, scale, inv)
+                {
+                    lines.push(tbl_line);
+                }
+            }
+        }
+    }
+
+    let parcel = LpParcel {
+        x: 0.0, y: 0.0,
+        width: doc.page_w_pt, height: doc.page_h_pt,
+        lines,
+    };
+    LpPage {
+        width: doc.page_w_pt,
+        height: doc.page_h_pt,
+        frames: vec![LpFrame { transform: LpTransform::identity(), parcel }],
+    }
+}
+
+fn lp_table_line(
+    fs: &mut FontSystem, table: &Table, cursor: &mut f32, page_idx: usize,
+    content_h_px: f32, page_top: f32, margin_l_px: f32, margin_t_px: f32,
+    content_w_px: f32, scale: f32, inv: f32,
+) -> Option<LpLine> {
+    let col_ws = col_widths(table, content_w_px, scale);
+    let tbl_indent_px = table.indent_dxa as f32 / 20.0 * scale;
+    let tbl_y_abs = *cursor;
+
+    let total_h: f32 = table.rows.iter()
+        .map(|r| row_height(fs, r, &col_ws, table, scale))
+        .sum();
+
+    let tbl_page_y_px = margin_t_px + (tbl_y_abs - page_top);
+
+    let mut col_x_acc = margin_l_px + tbl_indent_px;
+    let columns: Vec<LpTableColumn> = col_ws.iter().map(|&w| {
+        let col = LpTableColumn { x: col_x_acc * inv, width: w * inv };
+        col_x_acc += w;
+        col
+    }).collect();
+
+    let mut lp_rows: Vec<LpTableRow> = Vec::new();
+    let mut row_cursor = *cursor;
+
+    for row in &table.rows {
+        let rh = row_height(fs, row, &col_ws, table, scale);
+        let row_y_in_tbl = row_cursor - tbl_y_abs;
+        let mut lp_cells: Vec<LpTableCell> = Vec::new();
+        let mut cell_x = margin_l_px + tbl_indent_px;
+        let mut grid_col = 0usize;
+
+        for (ci, cell) in row.cells.iter().enumerate() {
+            let span = cell.grid_span.max(1) as usize;
+            let cw: f32 = (grid_col..grid_col + span)
+                .map(|g| col_ws.get(g).copied().unwrap_or(0.0))
+                .sum::<f32>().max(1.0);
+            grid_col += span;
+
+            let m = cell_margins(table, cell);
+            let inner_x = cell_x + m.left as f32 / 20.0 * scale;
+            let inner_w = (cw - (m.left + m.right) as f32 / 20.0 * scale).max(1.0);
+            let mut cell_abs = row_cursor + m.top as f32 / 20.0 * scale;
+
+            let cell_parcel = lp_cell_parcel(
+                fs, &cell.blocks, inner_x, inner_w, &mut cell_abs,
+                page_idx, content_h_px, page_top, margin_t_px, scale, inv,
+            );
+
+            lp_cells.push(LpTableCell {
+                col_index: ci,
+                col_span: span,
+                row_span: 1,
+                x: (cell_x - margin_l_px - tbl_indent_px) * inv,
+                y: row_y_in_tbl * inv,
+                width: cw * inv,
+                height: rh * inv,
+                parcel: cell_parcel,
+            });
+            cell_x += cw;
+        }
+
+        lp_rows.push(LpTableRow { y: row_y_in_tbl * inv, height: rh * inv, cells: lp_cells });
+        row_cursor += rh;
+    }
+
+    *cursor += total_h;
+
+    let tbl_w_px = col_ws.iter().sum::<f32>();
+    Some(LpLine {
+        y: tbl_page_y_px * inv,
+        width: tbl_w_px * inv,
+        height: total_h * inv,
+        space_before: 0.0,
+        space_after: 0.0,
+        is_first_line_of_para: true,
+        is_last_line_of_para: true,
+        content: LpLineContent::Table(LpTable {
+            width: tbl_w_px * inv,
+            height: total_h * inv,
+            columns,
+            rows: lp_rows,
+        }),
+    })
+}
+
+fn lp_cell_parcel(
+    fs: &mut FontSystem, blocks: &[Block],
+    inner_x: f32, inner_w: f32, cur_abs: &mut f32,
+    _page_idx: usize, _content_h_px: f32, _page_top: f32,
+    _margin_t_px: f32, scale: f32, inv: f32,
+) -> Option<LpParcel> {
+    let parcel_start = *cur_abs;
+    let mut lines: Vec<LpLine> = Vec::new();
+
+    for block in blocks {
+        match block {
+            Block::Paragraph(p) => {
+                *cur_abs += para_space_before(p, scale);
+                let indent_l = p.indent_left_pt * scale;
+                let eff_x = inner_x + indent_l;
+                let eff_w = (inner_w - indent_l - p.indent_right_pt * scale).max(1.0);
+
+                let buf = layout_paragraph(fs, p, eff_w, scale);
+                let lh = buf.metrics().line_height;
+                let all_runs: Vec<_> = buf.layout_runs().collect();
+                let n = all_runs.len();
+
+                for (li, lr) in all_runs.iter().enumerate() {
+                    let line_abs_top = *cur_abs + lr.line_top;
+                    let line_y_in_parcel = (line_abs_top - parcel_start) * inv;
+                    let baseline_off = (lr.line_y - lr.line_top) * inv;
+                    let font_sz_px = lr.glyphs.first().map(|g| g.font_size)
+                        .unwrap_or(p.mark_style.size_pt * scale);
+                    let font_sz_pt = font_sz_px * inv;
+                    let ascent_px = lr.line_y - lr.line_top;
+                    let descent_px = lh - ascent_px;
+
+                    let glyphs: Vec<LpGlyph> = lr.glyphs.iter().map(|g| LpGlyph {
+                        x: g.x * inv, y: 0.0, advance: g.w * inv, offset: g.start,
+                    }).collect();
+
+                    let lp_run = LpRun {
+                        x: (eff_x - inner_x) * inv,
+                        width: lr.line_w * inv,
+                        transform: LpTransform::identity(),
+                        content: LpRunContent::Glyphs {
+                            text: lr.text.to_string(),
+                            font_size: font_sz_pt,
+                            ascent: ascent_px * inv,
+                            descent: descent_px * inv,
+                            glyphs,
+                        },
+                    };
+                    lines.push(LpLine {
+                        y: line_y_in_parcel,
+                        width: lr.line_w * inv,
+                        height: lh * inv,
+                        space_before: 0.0,
+                        space_after: 0.0,
+                        is_first_line_of_para: li == 0,
+                        is_last_line_of_para: li + 1 == n,
+                        content: LpLineContent::RunList(LpRunList {
+                            baseline: baseline_off,
+                            width: lr.line_w * inv,
+                            height: lh * inv,
+                            runs: vec![lp_run],
+                        }),
+                    });
+                }
+                *cur_abs += n as f32 * lh;
+                *cur_abs += para_space_after(p, scale);
+            }
+            Block::Table(_) => {}
+            Block::PageBreak => {}
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(LpParcel {
+            x: 0.0, y: 0.0,
+            width: inner_w * inv,
+            height: (*cur_abs - parcel_start) * inv,
+            lines,
+        })
     }
 }

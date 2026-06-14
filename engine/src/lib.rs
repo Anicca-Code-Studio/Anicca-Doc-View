@@ -59,13 +59,6 @@ struct PageGroupJs {
     page_count: usize,
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LayoutPageJs {
-    width: f32,
-    height: f32,
-    frames: Vec<()>,
-}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -252,12 +245,12 @@ impl Wasm {
 
     pub fn render_page_gpu(
         &mut self,
-        _document_id: String,
-        _page_index: usize,
-        _width: usize,
-        _height: usize,
+        document_id: String,
+        page_index: usize,
+        width: usize,
+        height: usize,
     ) -> Result<Vec<u8>, JsValue> {
-        Err(JsValue::from_str("gpu rendering not supported"))
+        self.render_page_to_rgba(document_id, page_index, width, height)
     }
 
     pub fn get_outline(&self, document_id: String) -> Result<JsValue, JsValue> {
@@ -299,16 +292,13 @@ impl Wasm {
     }
 
     pub fn get_layout_page(
-        &self,
+        &mut self,
         document_id: String,
-        _page_index: usize,
+        page_index: usize,
     ) -> Result<JsValue, JsValue> {
-        let doc = self.doc(&document_id)?;
-        to_js(&LayoutPageJs {
-            width: doc.page_w_pt,
-            height: doc.page_h_pt,
-            frames: Vec::new(),
-        })
+        let doc = self.doc(&document_id)?.clone();
+        let page = render::layout_page(&mut self.fonts, &doc, page_index);
+        to_js(&page)
     }
 
     pub fn get_visibility_groups(&self, _document_id: String) -> Result<JsValue, JsValue> {
@@ -338,6 +328,23 @@ impl Wasm {
 
     #[wasm_bindgen(js_name = enableGoogleFonts)]
     pub fn enable_google_fonts(&mut self) {}
+
+    /// Register a font from raw bytes. Call before load() for best results.
+    /// Accepts TTF/OTF/WOFF2 bytes fetched from any source (Google Fonts, custom URL, etc).
+    #[wasm_bindgen(js_name = registerFontData)]
+    pub fn register_font_data(&mut self, bytes: Vec<u8>) {
+        if bytes.len() >= 4 {
+            self.fonts.db_mut().load_font_data(bytes);
+        }
+    }
+
+    /// Return the list of font family names declared in a DOCX document.
+    /// JS can use this to prefetch fonts before calling load().
+    #[wasm_bindgen(js_name = getDeclaredFonts)]
+    pub fn get_declared_fonts(&self, bytes: Vec<u8>) -> Result<JsValue, JsValue> {
+        let names = docx::extract_font_declarations(&bytes);
+        to_js(&names)
+    }
 
     pub fn pdf_compose(&mut self, _compositions: JsValue, _doc_ids: JsValue) -> Result<JsValue, JsValue> {
         Err(JsValue::from_str("pdf operations not supported"))

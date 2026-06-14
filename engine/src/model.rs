@@ -26,6 +26,10 @@ pub struct RunStyle {
     pub color: [u8; 3],
     /// Font family name as specified in the document (e.g. "Calibri", "Arial").
     pub font_name: Option<String>,
+    /// East Asian font family (w:rFonts w:eastAsia). Used for CJK characters.
+    pub font_name_east_asia: Option<String>,
+    /// Complex script font size in points (w:szCs). None = same as size_pt.
+    pub size_cs_pt: Option<f32>,
 }
 
 impl Default for RunStyle {
@@ -38,6 +42,8 @@ impl Default for RunStyle {
             size_pt: 11.0,
             color: [0, 0, 0],
             font_name: None,
+            font_name_east_asia: None,
+            size_cs_pt: None,
         }
     }
 }
@@ -75,6 +81,10 @@ pub struct AnchorImage {
     pub pos_ref_h: u8,
     /// Vertical reference: 0=paragraph, 1=page, 2=margin.
     pub pos_ref_v: u8,
+    /// Horizontal alignment when wp:align is used: 0=none (use pos_x_emu), 1=center, 2=right, 3=left.
+    pub align_h: u8,
+    /// Vertical alignment when wp:align is used: 0=none (use pos_y_emu), 1=center, 2=bottom, 3=top.
+    pub align_v: u8,
     /// True if image is rendered behind text (behindDoc).
     pub behind_doc: bool,
 }
@@ -142,6 +152,14 @@ pub struct Paragraph {
     /// Paragraph-mark run style; determines the height of empty paragraphs
     /// (e.g. blank header lines with an explicit w:sz on the mark).
     pub mark_style: RunStyle,
+    /// Absolute line height in points (w:lineRule="exact"). When Some, overrides line_pct.
+    pub line_height_exact_pt: Option<f32>,
+    /// Minimum line height in points (w:lineRule="atLeast"). Natural height is used if larger.
+    pub line_height_atleast_pt: Option<f32>,
+    /// Spacing before in line units (w:beforeLines, 100ths of a line). Overrides space_before_pt when Some.
+    pub space_before_lines: Option<f32>,
+    /// Spacing after in line units (w:afterLines, 100ths of a line). Overrides space_after_pt when Some.
+    pub space_after_lines: Option<f32>,
 }
 
 impl Default for Paragraph {
@@ -161,6 +179,10 @@ impl Default for Paragraph {
             list_hanging_pt: 0.0,
             tab_stops: Vec::new(),
             mark_style: RunStyle::default(),
+            line_height_exact_pt: None,
+            line_height_atleast_pt: None,
+            space_before_lines: None,
+            space_after_lines: None,
         }
     }
 }

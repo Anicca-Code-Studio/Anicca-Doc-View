@@ -110,6 +110,8 @@ export type WorkerRequest =
     | { type: "pdfCompress"; documentId: string }
     | { type: "pdfDecompress"; documentId: string }
     | { type: "registerFonts"; fonts: FontEntry[] }
+    | { type: "registerFontData"; bytes: Uint8Array }
+    | { type: "getDeclaredFonts"; bytes: Uint8Array }
     | { type: "enableGoogleFonts" }
     | { type: "getVisibilityGroups"; documentId: string }
     | { type: "setVisibilityGroupVisible"; documentId: string; groupId: string; visible: boolean }
@@ -185,6 +187,10 @@ export type WorkerResponse =
     | { type: "pdfDecompress"; success: false; error: string }
     | { type: "registerFonts"; success: true }
     | { type: "registerFonts"; success: false; error: string }
+    | { type: "registerFontData"; success: true }
+    | { type: "registerFontData"; success: false; error: string }
+    | { type: "getDeclaredFonts"; success: true; fonts: string[] }
+    | { type: "getDeclaredFonts"; success: false; error: string }
     | { type: "enableGoogleFonts"; success: true }
     | { type: "enableGoogleFonts"; success: false; error: string }
     | { type: "getVisibilityGroups"; success: true; groups: VisibilityGroup[] }
@@ -238,9 +244,12 @@ async function handleMessage(event: MessageEvent<WorkerRequest & { _id?: number 
     try {
         switch (request.type) {
             case "init": {
+                console.log("[WORKER] init start wasmUrl=" + request.wasmUrl);
                 const exports = await init(request.wasmUrl ? { module_or_path: request.wasmUrl } : undefined);
+                console.log("[WORKER] WASM init done, exports keys=" + Object.keys(exports || {}).join(","));
                 wasmMemory = (exports as { memory?: WebAssembly.Memory }).memory ?? null;
                 wasm = new Wasm(request.domain, request.viewerVersion);
+                console.log("[WORKER] Wasm object created ok");
                 if (request.gpu) {
                     try {
                         gpuAvailable = await wasm.init_gpu();
@@ -491,6 +500,20 @@ async function handleMessage(event: MessageEvent<WorkerRequest & { _id?: number 
                 break;
             }
 
+            case "registerFontData": {
+                ensureInitialized();
+                wasm!.registerFontData(request.bytes);
+                respond({ type: "registerFontData", success: true });
+                break;
+            }
+
+            case "getDeclaredFonts": {
+                ensureInitialized();
+                const fonts = wasm!.getDeclaredFonts(request.bytes) as string[];
+                respond({ type: "getDeclaredFonts", success: true, fonts });
+                break;
+            }
+
             case "enableGoogleFonts": {
                 ensureInitialized();
                 wasm!.enableGoogleFonts();
@@ -549,6 +572,7 @@ async function handleMessage(event: MessageEvent<WorkerRequest & { _id?: number 
         }
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error("[WORKER] ERROR in " + request.type + ": " + errorMessage + (error instanceof Error ? "\n" + error.stack : ""));
         respond({ type: request.type, success: false, error: errorMessage } as WorkerResponse);
     }
 }

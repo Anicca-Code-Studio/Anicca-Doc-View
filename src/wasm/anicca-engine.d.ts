@@ -958,6 +958,17 @@ export class Wasm {
      */
     registerFonts(fonts: JsFontRegistration[]): void;
     /**
+     * Register a font from raw bytes (TTF/OTF/WOFF2).
+     * Call before load() to ensure the font is available during rendering.
+     * This is the mechanism for on-demand font loading (docmentis-style).
+     */
+    registerFontData(bytes: Uint8Array): void;
+    /**
+     * Return the list of font family names declared in a DOCX document's fontTable.xml.
+     * Use this to determine which fonts to fetch before calling load().
+     */
+    getDeclaredFonts(bytes: Uint8Array): string[];
+    /**
      * Remove a document by ID.
      *
      * Returns true if the document was removed, false if it didn't exist.
