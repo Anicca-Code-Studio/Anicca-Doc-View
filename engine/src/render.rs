@@ -1352,8 +1352,13 @@ fn render_cell_blocks(
                         if img_w > 0 && img_h > 0 {
                             if page_of(*cur_abs, content_h_px) == page {
                                 let ry = margin_t_px + (*cur_abs - page_top);
+                                let render_x = match p.align {
+                                    Align::Center => eff_x + (eff_w - img_w as f32) / 2.0,
+                                    Align::Right  => eff_x + eff_w - img_w as f32,
+                                    _             => eff_x,
+                                };
                                 blit_image(rgba, out_w, out_h, &img.data, img.format.clone(),
-                                           eff_x as i32, ry as i32, img_w, img_h);
+                                           render_x as i32, ry as i32, img_w, img_h);
                             }
                             *cur_abs += img_h as f32;
                         }
