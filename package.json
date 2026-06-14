@@ -1,6 +1,6 @@
 {
-    "name": "@anicca-code-studio/anicca-doc-view",
-    "version": "0.1.3",
+    "name": "anicca-doc-view",
+    "version": "0.1.4",
     "type": "module",
     "license": "MIT",
     "author": "Anicca Code Studio <aniccacodestudio@gmail.com>",
@@ -45,7 +45,8 @@
         }
     },
     "files": [
-        "dist"
+        "dist",
+        "README.md"
     ],
     "sideEffects": false,
     "engines": {
@@ -72,6 +73,7 @@
         "vitest": "^4.1.8"
     },
     "publishConfig": {
-  "registry": "https://npm.pkg.github.com"
+  "registry": "https://registry.npmjs.org/",
+  "access": "public"
 }
 }
