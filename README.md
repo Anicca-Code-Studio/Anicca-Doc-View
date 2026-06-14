@@ -52,6 +52,21 @@ covers DOCX.
 
 All styles are scoped under `.adv-viewer-root` and driven by `--adv-*` CSS custom properties. Toggle dark mode with the `adv-viewer-dark` class or the `theme` viewer option.
 
+## Support & Donations
+
+This project is built and maintained in my free time after my day job, similar to how Laravel was first developed. Everything is completely free and open source. Your support really helps me keep developing, maintaining, and improving these tools for the developer community.
+
+On a personal note, I'm also saving up to finally meet my girlfriend in Kyrgyzstan. We've been in a long-distance relationship between Indonesia and Kyrgyzstan for quite a while. Every donation brings me one step closer to closing this distance and building our future together.
+
+Thank you so much. Your support means a lot to me, both for the project and for this part of my life. 🙏
+
+| Platform | Link |
+|----------|------|
+| PayPal | [paypal.me/AdjieDev](https://paypal.me/AdjieDev) |
+| Saweria | [saweria.co/RikuKzry](https://saweria.co/RikuKzry) |
+| Ko-fi | [ko-fi.com/aniccacodestudio](https://ko-fi.com/aniccacodestudio) |
+| Trakteer | [trakteer.id/adjie.dev](https://trakteer.id/adjie.dev) |
+
 ## License
 
 MIT License, Copyright (c) 2026 Anicca Code Studio. See [LICENSE](./LICENSE).

@@ -1,6 +1,6 @@
 {
-    "name": "anicca-doc-view",
-    "version": "0.1.2",
+    "name": "@anicca-code-studio/anicca-doc-view",
+    "version": "0.1.3",
     "type": "module",
     "license": "MIT",
     "author": "Anicca Code Studio <aniccacodestudio@gmail.com>",
@@ -8,7 +8,7 @@
         "type": "git",
         "url": "https://github.com/anicca-code-studio/anicca-doc-view.git"
     },
-    "homepage": "https://github.com/anicca-code-studio/anicca-doc-view#readme",
+    "homepage": "https://anicca-doc-view.web.app",
     "description": "Universal document viewer for the web by Anicca Code Studio. Framework-agnostic viewer powered by a WebAssembly engine for high-fidelity rendering across PDF, DOCX, PPTX, XLSX, SVG, and images.",
     "keywords": [
         "viewer",
@@ -70,5 +70,8 @@
         "typescript": "^6.0.3",
         "vite": "^8.0.16",
         "vitest": "^4.1.8"
-    }
+    },
+    "publishConfig": {
+  "registry": "https://npm.pkg.github.com"
+}
 }
