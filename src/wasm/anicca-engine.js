@@ -298,14 +298,14 @@ export class Wasm {
         wasm.wasm_registerFonts(this.__wbg_ptr, _fonts);
     }
     /**
-     * @param {string} _document_id
+     * @param {string} document_id
      * @returns {string}
      */
-    document_format(_document_id) {
+    document_format(document_id) {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ptr0 = passStringToWasm0(_document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr0 = passStringToWasm0(document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
             const ret = wasm.wasm_document_format(this.__wbg_ptr, ptr0, len0);
             deferred2_0 = ret[0];
@@ -386,7 +386,7 @@ export class Wasm {
         return takeFromExternrefTable0(ret[0]);
     }
     /**
-     * Return the list of font family names declared in a DOCX document.
+     * Return the list of font family names declared in a document.
      * JS can use this to prefetch fonts before calling load().
      * @param {Uint8Array} bytes
      * @returns {any}
@@ -592,13 +592,13 @@ export class Wasm {
     }
     /**
      * @param {string} document_id
-     * @param {number} _page_index
+     * @param {number} page_index
      * @returns {any}
      */
-    page_info(document_id, _page_index) {
+    page_info(document_id, page_index) {
         const ptr0 = passStringToWasm0(document_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasm_page_info(this.__wbg_ptr, ptr0, len0, _page_index);
+        const ret = wasm.wasm_page_info(this.__wbg_ptr, ptr0, len0, page_index);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }

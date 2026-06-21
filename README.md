@@ -4,14 +4,14 @@ Universal document viewer for the web by Anicca Code Studio. Framework-agnostic,
 
 ## Supported formats
 
-- Word (`.docx`) — **implemented** (text, bold/italic, size, color, alignment, pagination, styles.xml resolution, heading outline, paragraph spacing)
+- Word (`.docx`) — **implemented** (text, bold/italic, size, color, alignment, pagination, styles.xml resolution, heading outline, paragraph spacing, tables, images)
+- Excel (`.xlsx`) — **implemented** (multi-sheet workbooks, cell text and styles, bold/italic/color/font, borders, background fills, MDW column widths, VAlign, row heights, theme colors, shared strings, inlineStr rich text)
 
-Roadmap (engine in progress, not yet available):
+Roadmap (not yet available):
 
 - Images (`.png`, `.jpg`, …)
 - PDF (`.pdf`)
 - PowerPoint (`.pptx`)
-- Excel (`.xlsx`)
 
 The rendering engine lives in [`engine/`](./engine) and is built separately; see [`engine/README.md`](./engine/README.md).
 
@@ -46,7 +46,7 @@ await viewer.load({ url: "/documents/example.docx" });
 
 The viewer shell carries over the full feature set (search, annotations, panels,
 transitions); availability of each depends on engine support, which currently
-covers DOCX.
+covers DOCX and XLSX.
 
 ## Theming
 

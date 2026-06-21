@@ -67,7 +67,7 @@ export function createFontsPanel() {
             // Build resolved font info row
             const allFonts: { info: typeof entry.resolved; primary: boolean }[] = [
                 { info: entry.resolved, primary: true },
-                ...entry.fallbacks.map((fb) => ({ info: fb, primary: false })),
+                ...entry.fallbacks.map((fb: any) => ({ info: fb, primary: false })),
             ];
 
             for (const { info, primary } of allFonts) {

@@ -214,6 +214,19 @@ pub enum BorderStyle {
     Dotted,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum VAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl Default for VAlign {
+    fn default() -> Self {
+        VAlign::Bottom
+    }
+}
+
 impl Default for BorderLine {
     fn default() -> Self {
         BorderLine {
@@ -262,6 +275,11 @@ pub struct TableCell {
     pub bg_color: Option<[u8; 3]>,
     /// Per-cell margin override (w:tcMar); None = inherit from table.
     pub margins: Option<CellMargins>,
+    /// When true, text renders on a single line (no word-wrap). Glyphs are
+    /// clipped at the cell right boundary. Used by XLSX cells without wrapText.
+    pub no_wrap: bool,
+    /// Vertical alignment within the cell (default Bottom for XLSX, Top for DOCX).
+    pub v_align: VAlign,
 }
 
 impl Default for TableCell {
@@ -273,6 +291,8 @@ impl Default for TableCell {
             borders: Borders::default(),
             bg_color: None,
             margins: None,
+            no_wrap: false,
+            v_align: VAlign::Top,
         }
     }
 }
@@ -340,6 +360,14 @@ pub struct HeaderFooter {
     pub blocks: Vec<Block>,
 }
 
+/// Sheet/page group for multi-sheet documents (XLSX).
+#[derive(Clone, Debug)]
+pub struct PageGroup {
+    pub name: String,
+    pub start_page: usize,
+    pub page_count: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Document {
     pub blocks: Vec<Block>,
@@ -372,6 +400,13 @@ pub struct Document {
     pub footer_margin_pt: f32,
     /// Page number of the first page (w:pgNumType w:start, default 1).
     pub page_num_start: i32,
+    /// Per-page (width_pt, height_pt) overrides. Empty = use page_w_pt/page_h_pt for all pages.
+    /// Used by XLSX where each sheet can have different dimensions.
+    pub page_dims: Vec<(f32, f32)>,
+    /// Named page groups (sheet tabs for XLSX).
+    pub page_groups: Vec<PageGroup>,
+    /// Document format: "docx" or "xlsx".
+    pub doc_format: String,
 }
 
 impl Document {

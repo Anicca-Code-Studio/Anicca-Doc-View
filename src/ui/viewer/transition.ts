@@ -157,6 +157,7 @@ function sideToTranslate(dir: SideDirection, progress: number): string {
         case "down":
             return `translateY(${p}%)`;
     }
+    return "";
 }
 
 function oppositeSide(dir: SideDirection): SideDirection {
@@ -467,7 +468,7 @@ function wipeEffect(dir: SideDirection): FrameFn {
         // the Gaussian blur feathers only the leading (moving) edge.  The SVG
         // viewBox clips the overflow, keeping the other edges crisp.
         const E = 50; // extension beyond viewBox
-        let rect: string;
+        let rect = "";
         switch (dir) {
             case "right":
                 // Moving edge: left side at x=p
@@ -743,7 +744,7 @@ function stripsEffect(dir: CornerDirection): FrameFn {
         }
         const d = t * 200;
         const blur = Math.max(0.5, t * 50 * 0.08);
-        let points: string;
+        let points = "";
 
         if (d <= 100) {
             switch (dir) {
@@ -1480,8 +1481,8 @@ function setupVortex(
             // Incoming stagger: reversed (right = right side assembles last).
             const colN = c / Math.max(1, cols - 1);
             const rowN = r / Math.max(1, rows - 1);
-            let outSt: number;
-            let inSt: number;
+            let outSt = 0;
+            let inSt = 0;
             switch (dir) {
                 case "right":
                     outSt = colN * 0.7 + rowN * 0.3;

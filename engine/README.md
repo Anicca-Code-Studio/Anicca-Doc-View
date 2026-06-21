@@ -13,8 +13,15 @@ class + `parseFontInfo`), so it drops in as `src/wasm/anicca-engine*`.
   color, alignment, page geometry, pagination, and text rasterization via bundled
   DejaVu Sans. Resolves `styles.xml` (docDefaults + named styles + basedOn chains),
   paragraph spacing (before/after/line), and heading styles, which also populate
-  the outline panel. Deterministic and self-contained.
-- **PDF / PPTX / XLSX / images**: not yet implemented; `load` returns an explicit
+  the outline panel. Tables, inline and anchored images. Deterministic and self-contained.
+- **XLSX**: implemented natively — multi-sheet workbooks, cell text and rich text
+  (shared strings and inlineStr with per-run `<rPr>`), numeric and date values,
+  cell styles via ECMA-376 `cellXfs`/`cellStyleXfs` resolution, bold/italic/color/font,
+  all border styles, background fills, theme color resolution (OOXML theme + tint/shade),
+  MDW-based column widths (per-font lookup table), VAlign (top/middle/bottom),
+  `defaultRowHeight` and per-row `customHeight`, `no-wrap` clipping, two-pass
+  page height measurement to prevent canvas under-allocation.
+- **PDF / PPTX / images**: not yet implemented; `load` returns an explicit
   error. These are future milestones.
 
 ## Layout
@@ -26,8 +33,9 @@ engine/
   fonts/             # bundled DejaVu Sans (regular/bold/oblique/bold-oblique)
   src/
     lib.rs           # #[wasm_bindgen] Wasm API + parseFontInfo
-    model.rs         # document model (paragraphs, runs, styles)
+    model.rs         # document model shared by DOCX and XLSX
     docx.rs          # OOXML unzip + WordprocessingML parser
+    xlsx.rs          # OOXML unzip + SpreadsheetML parser
     render.rs        # cosmic-text layout + glyph rasterization to RGBA
 ```
 

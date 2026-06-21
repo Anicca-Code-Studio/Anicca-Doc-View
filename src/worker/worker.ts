@@ -5,21 +5,20 @@
  */
 
 import init, { Wasm, parseFontInfo } from "../wasm/anicca-engine.js";
-import type {
-    JsOutlineSection as OutlineSection,
-    JsSplitByOutlineResult as SplitByOutlineResult,
-    JsFontRegistration as FontEntry,
-    JsAnnotation as Annotation,
-    JsAnnotationsByPage as AnnotationsByPage,
-    JsOutlineItem as OutlineItem,
-    JsVisibilityGroup as VisibilityGroup,
-    JsFontUsageEntry as FontUsageEntry,
-    JsLayoutPage as LayoutPage,
-    JsPageInfo as PageInfo,
-    JsPageTransition as PageTransition,
-    JsPageGroup as PageGroup,
-    JsPageGroupLayout as PageGroupLayout,
-} from "../wasm/anicca-engine.js";
+// WASM types removed from generated bindings; use structural any until regenerated
+type OutlineSection = any;
+type SplitByOutlineResult = any;
+type FontEntry = any;
+type Annotation = any;
+type AnnotationsByPage = any;
+type OutlineItem = any;
+type VisibilityGroup = any;
+type FontUsageEntry = any;
+type LayoutPage = any;
+type PageInfo = any;
+type PageTransition = any;
+type PageGroup = any;
+type PageGroupLayout = any;
 
 export type {
     OutlineSection,
@@ -456,11 +455,11 @@ async function handleMessage(event: MessageEvent<WorkerRequest & { _id?: number 
                 const rawImages = wasm!.pdf_extract_images(request.documentId, request.convertRawToPng);
                 // Copy Uint8Array data to ensure proper transfer across worker boundary
                 // (WASM memory views don't survive structured clone when nested in objects)
-                const images = rawImages.map((img) => ({
+                const images = rawImages.map((img: any) => ({
                     ...img,
                     data: new Uint8Array(img.data),
                 }));
-                const transfers = images.map((img) => img.data.buffer);
+                const transfers = images.map((img: any) => img.data.buffer);
                 respond({ type: "pdfExtractImages", success: true, images }, transfers);
                 break;
             }
@@ -470,11 +469,11 @@ async function handleMessage(event: MessageEvent<WorkerRequest & { _id?: number 
                 const rawFonts = wasm!.pdf_extract_fonts(request.documentId);
                 // Copy Uint8Array data to ensure proper transfer across worker boundary
                 // (WASM memory views don't survive structured clone when nested in objects)
-                const fonts = rawFonts.map((font) => ({
+                const fonts = rawFonts.map((font: any) => ({
                     ...font,
                     data: new Uint8Array(font.data),
                 }));
-                const transfers = fonts.map((font) => font.data.buffer);
+                const transfers = fonts.map((font: any) => font.data.buffer);
                 respond({ type: "pdfExtractFonts", success: true, fonts }, transfers);
                 break;
             }

@@ -1,4 +1,4 @@
-//! Layout + rasterization for the new Document model (blocks: paragraphs + tables + images).
+﻿//! Layout + rasterization for the new Document model (blocks: paragraphs + tables + images).
 //! Uses cosmic-text for text shaping/layout. Embedded fonts from the DOCX are
 //! loaded into the FontSystem so character metrics match the original document.
 
@@ -8,13 +8,13 @@ use cosmic_text::{
 };
 use serde::Serialize;
 
-use crate::model::{Align, AnchorImage, Block, BorderStyle, Document, ImageFormat, Paragraph, Table, TabAlign, TabLeader};
+use crate::model::{Align, AnchorImage, Block, BorderStyle, Document, ImageFormat, Paragraph, Table, TabAlign, TabLeader, VAlign};
 
 // Single-spacing line height multiplier. The reference viewer uses 1.15.
 const LINE_FACTOR: f32 = 1.15;
 const EMU_PER_PT: f64 = 12700.0;
 
-// ── font system ───────────────────────────────────────────────────────────────
+// â”€â”€ font system â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn new_font_system() -> FontSystem {
     let mut db = cosmic_text::fontdb::Database::new();
@@ -126,7 +126,7 @@ fn resolve_family(name: &str) -> Family<'_> {
     }
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn ct_align(a: Align) -> Option<CtAlign> {
     match a {
@@ -150,7 +150,7 @@ fn page_of(y: f32, page_h: f32) -> usize {
     (((y + 0.25) / page_h).floor() as isize).max(0) as usize
 }
 
-// ── paragraph layout ──────────────────────────────────────────────────────────
+// â”€â”€ paragraph layout â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Lays out one paragraph. `width_px` is the available content width in pixels.
 /// Returns the laid-out Buffer.
@@ -358,7 +358,7 @@ fn draw_dot_leader(
                 let pen_x = x + phys.x as f32;
                 let pen_y = baseline + phys.y as f32;
                 if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                    blit_glyph(rgba, out_w, out_h, img, pen_x, pen_y, color);
+                    blit_glyph(rgba, out_w, out_h, img, pen_x, pen_y, color, None);
                 }
             }
         }
@@ -380,7 +380,7 @@ fn para_height(fs: &mut FontSystem, para: &Paragraph, width_px: f32, scale: f32)
     (buffer_height(&buf) + img_height).max(scale) // at least 1 line
 }
 
-// ── table helpers ─────────────────────────────────────────────────────────────
+// â”€â”€ table helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Compute effective table pixel width.
 fn table_px(table: &Table, content_w_px: f32, scale: f32) -> f32 {
@@ -482,12 +482,14 @@ fn row_height(
         let cw: f32 = (grid_col..grid_col+span).map(|g| col_ws.get(g).copied().unwrap_or(0.0)).sum::<f32>().max(1.0);
         grid_col += span;
         let inner_w = (cw - (m.left + m.right) as f32 / 20.0 * scale).max(1.0);
+        // no_wrap cells render at layout_w=99999 (single line); measure at same width.
+        let meas_w = if cell.no_wrap { 99999.0 } else { inner_w };
         let mut cell_h: f32 = (m.top + m.bottom) as f32 / 20.0 * scale;
         for block in &cell.blocks {
             match block {
                 Block::Paragraph(p) => {
                     cell_h += para_space_before(p, scale);
-                    cell_h += para_height(fs, p, inner_w, scale);
+                    cell_h += para_height(fs, p, meas_w, scale);
                     cell_h += para_space_after(p, scale);
                 }
                 Block::Table(t) => {
@@ -514,7 +516,7 @@ fn table_height(fs: &mut FontSystem, table: &Table, content_w_px: f32, scale: f3
         .sum()
 }
 
-// ── body geometry ─────────────────────────────────────────────────────────────
+// â”€â”€ body geometry â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Body top offset and body height in px. Word pushes the body down when the
 /// header content is taller than the space between the header position and the
@@ -537,7 +539,7 @@ fn body_metrics(fs: &mut FontSystem, doc: &Document, scale: f32) -> (f32, f32) {
     (top, h)
 }
 
-// ── measure (pagination) ──────────────────────────────────────────────────────
+// â”€â”€ measure (pagination) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Compute page count and per-block starting page. Returns (page_count, block_pages).
 pub fn measure(fs: &mut FontSystem, doc: &Document) -> (usize, Vec<usize>) {
@@ -585,7 +587,37 @@ pub fn measure(fs: &mut FontSystem, doc: &Document) -> (usize, Vec<usize>) {
     (page_count, block_pages)
 }
 
-// ── render ────────────────────────────────────────────────────────────────────
+/// For XLSX documents, recompute page_dims heights from actual rendered row heights.
+/// XLSX parse() uses declared row heights for canvas allocation. Auto-height rows
+/// (height_exact=false) expand during render. This two-pass fix measures actual
+/// heights using the same FontSystem as rendering so canvas is sized correctly.
+pub fn measure_xlsx_page_heights(fs: &mut FontSystem, doc: &mut Document) {
+    if doc.doc_format != "xlsx" {
+        return;
+    }
+    let mut page_idx = 0usize;
+    for block in &doc.blocks {
+        match block {
+            Block::Table(table) => {
+                // Measure at scale=4.0 to minimize pixel-rounding error in text wrap
+                // decisions. Dividing back by 4.0 gives points. Measuring at scale=1.0
+                // causes cosmic-text rounding to undercount wrap lines vs higher scales.
+                let meas_scale = 4.0f32;
+                let content_w_px = table.width_dxa as f32 / 20.0 * meas_scale;
+                let actual_h = table_height(fs, table, content_w_px, meas_scale) / meas_scale;
+                if let Some(dims) = doc.page_dims.get_mut(page_idx) {
+                    // Expand only: declared height is minimum, content may need more
+                    dims.1 = dims.1.max(actual_h);
+                }
+                page_idx += 1;
+            }
+            Block::PageBreak => {}
+            _ => {}
+        }
+    }
+}
+
+// â”€â”€ render â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn render_page(
     fs: &mut FontSystem,
@@ -600,11 +632,27 @@ pub fn render_page(
         return rgba;
     }
 
-    let scale = out_w as f32 / doc.page_w_pt;
+    // Per-page dimension override (used by XLSX where each sheet has its own size).
+    let (page_w_pt, page_h_pt) = doc
+        .page_dims
+        .get(page)
+        .copied()
+        .unwrap_or((doc.page_w_pt, doc.page_h_pt));
+
+    let scale = out_w as f32 / page_w_pt;
     let margin_l_px = doc.margin_l_pt * scale;
-    let content_w_px = doc.content_w_pt() * scale;
+    // For XLSX (margin=0), content fills the full page width.
+    let content_w_px = (page_w_pt - doc.margin_l_pt - doc.margin_r_pt).max(1.0) * scale;
     // Body geometry honors tall headers/footers (must match measure()).
-    let (margin_t_px, content_h_px) = body_metrics(fs, doc, scale);
+    // For XLSX (no headers/footers, no margins), body_metrics gives (0, page_h_pt*scale).
+    let (margin_t_px, content_h_px) = if doc.page_dims.is_empty() {
+        body_metrics(fs, doc, scale)
+    } else {
+        let top = doc.margin_t_pt * scale;
+        let bottom = doc.margin_b_pt * scale;
+        let h = (page_h_pt * scale - top - bottom).max(1.0);
+        (top, h)
+    };
     let page_top = page as f32 * content_h_px;
 
     // Displayed page number honors w:pgNumType w:start (e.g. cover = 0)
@@ -624,11 +672,33 @@ pub fn render_page(
     let ftr = if page == 0 { doc.footer_first.as_ref() } else { doc.footer.as_ref() };
     if let Some(f) = ftr {
         let fh = measure_hf_height(fs, &f.blocks, content_w_px, scale);
-        let y0 = (doc.page_h_pt - doc.footer_margin_pt) * scale - fh;
+        let y0 = (page_h_pt - doc.footer_margin_pt) * scale - fh;
         render_hf_blocks(
             fs, swash, &mut rgba, out_w, out_h,
             &f.blocks, margin_l_px, y0, content_w_px, scale, page_number,
         );
+    }
+
+    // XLSX fast path: each page is one independent sheet; render only that table.
+    // This bypasses the pagination logic which assumes uniform page heights.
+    if !doc.page_dims.is_empty() {
+        let clip_h = page_h_pt * scale;
+        let mut cursor_y = 0.0f32;
+        for (i, block) in doc.blocks.iter().enumerate() {
+            let bp = doc.block_pages.get(i).copied().unwrap_or(0);
+            if bp != page {
+                continue;
+            }
+            if let Block::Table(table) = block {
+                render_table(
+                    fs, swash, &mut rgba, out_w, out_h,
+                    table, &mut cursor_y,
+                    0, clip_h, 0.0,
+                    margin_l_px, 0.0, content_w_px, scale,
+                );
+            }
+        }
+        return rgba;
     }
 
     let mut cursor = 0.0f32; // absolute y in pixels across all pages
@@ -695,7 +765,7 @@ pub fn render_page(
 
                 if has_tabs {
                     // Split at LAST \t: everything before = left text (entry title);
-                    // everything after = right text (page number). Intermediate \t → space.
+                    // everything after = right text (page number). Intermediate \t â†’ space.
                     let mut left_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
                     let mut right_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
                     let mut tab_style: Option<crate::model::RunStyle> = None;
@@ -777,7 +847,7 @@ pub fn render_page(
                                     let pen_x = left_cur_x + phys.x as f32;
                                     let pen_y = baseline + phys.y as f32;
                                     if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                                        blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color);
+                                        blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color, None);
                                     }
                                 }
                             }
@@ -812,7 +882,7 @@ pub fn render_page(
                                     let pen_x = right_x + phys.x as f32;
                                     let pen_y = baseline + phys.y as f32;
                                     if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                                        blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color);
+                                        blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color, None);
                                     }
                                 }
                             }
@@ -838,7 +908,7 @@ pub fn render_page(
                         let pen_x = eff_content_x + phys.x as f32;
                         let pen_y = baseline + phys.y as f32;
                         if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                            blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color);
+                            blit_glyph(&mut rgba, out_w, out_h, img, pen_x, pen_y, color, None);
                         }
                     }
                 }
@@ -880,7 +950,7 @@ pub fn render_page(
     rgba
 }
 
-// ── anchor image rendering ────────────────────────────────────────────────────
+// â”€â”€ anchor image rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[allow(clippy::too_many_arguments)]
 fn render_anchor_images(
@@ -962,7 +1032,7 @@ fn render_anchor_images(
     }
 }
 
-// ── header/footer rendering ───────────────────────────────────────────────────
+// â”€â”€ header/footer rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Total height of header/footer content in pixels.
 fn measure_hf_height(fs: &mut FontSystem, blocks: &[Block], content_w_px: f32, scale: f32) -> f32 {
@@ -1058,7 +1128,7 @@ fn render_hf_paragraph(
     let has_tab = p.runs.iter().any(|r| r.inline_image.is_none() && r.text.contains('\t'));
 
     if has_tab {
-        // Split at LAST \t: left = title text, right = page number. Intermediate \t → space.
+        // Split at LAST \t: left = title text, right = page number. Intermediate \t â†’ space.
         let mut left_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
         let mut right_parts: Vec<(String, crate::model::RunStyle)> = Vec::new();
         let mut tab_style: Option<crate::model::RunStyle> = None;
@@ -1116,7 +1186,7 @@ fn render_hf_paragraph(
                     let phys = glyph.physical((0.0, 0.0), 1.0);
                     let color = glyph.color_opt.unwrap_or(Color::rgb(0, 0, 0));
                     if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                        blit_glyph(rgba, out_w, out_h, img, left_x + phys.x as f32, baseline + phys.y as f32, color);
+                        blit_glyph(rgba, out_w, out_h, img, left_x + phys.x as f32, baseline + phys.y as f32, color, None);
                     }
                 }
             }
@@ -1148,7 +1218,7 @@ fn render_hf_paragraph(
                     let phys = glyph.physical((0.0, 0.0), 1.0);
                     let color = glyph.color_opt.unwrap_or(Color::rgb(0, 0, 0));
                     if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                        blit_glyph(rgba, out_w, out_h, img, right_x + phys.x as f32, baseline + phys.y as f32, color);
+                        blit_glyph(rgba, out_w, out_h, img, right_x + phys.x as f32, baseline + phys.y as f32, color, None);
                     }
                 }
             }
@@ -1165,7 +1235,7 @@ fn render_hf_paragraph(
                 let phys = glyph.physical((0.0, 0.0), 1.0);
                 let color = glyph.color_opt.unwrap_or(Color::rgb(0, 0, 0));
                 if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                    blit_glyph(rgba, out_w, out_h, img, eff_x + phys.x as f32, baseline + phys.y as f32, color);
+                    blit_glyph(rgba, out_w, out_h, img, eff_x + phys.x as f32, baseline + phys.y as f32, color, None);
                 }
             }
         }
@@ -1215,7 +1285,31 @@ fn render_hf_blocks(
     }
 }
 
-// ── table rendering ───────────────────────────────────────────────────────────
+// â”€â”€ table rendering â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// Measure total rendered height of cell content blocks (used for v_align offset).
+fn measure_cell_content_h(
+    fs: &mut FontSystem,
+    blocks: &[Block],
+    layout_w: f32,
+    scale: f32,
+) -> f32 {
+    let mut h = 0.0f32;
+    for block in blocks {
+        match block {
+            Block::Paragraph(p) => {
+                h += para_space_before(p, scale);
+                h += para_height(fs, p, layout_w, scale);
+                h += para_space_after(p, scale);
+            }
+            Block::Table(t) => {
+                h += table_height(fs, t, layout_w, scale);
+            }
+            Block::PageBreak => {}
+        }
+    }
+    h
+}
 
 #[allow(clippy::too_many_arguments)]
 fn render_table(
@@ -1300,10 +1394,33 @@ fn render_table(
                 let m = cell_margins(table, cell);
                 let inner_x = cell_x + m.left as f32 / 20.0 * scale;
                 let inner_w = (cw - (m.left + m.right) as f32 / 20.0 * scale).max(1.0);
-                let mut cur_abs = row_abs_y + m.top as f32 / 20.0 * scale;
+                // For no-wrap cells, layout with a very large width so text stays on one line.
+                let layout_w = if cell.no_wrap { 99999.0 } else { inner_w };
+                // Clip right boundary for no-wrap: glyphs past cell edge are skipped.
+                let clip_right = if cell.no_wrap { Some(cell_x + cw) } else { None };
+                // Vertical alignment offset (only meaningful for exact-height rows).
+                let v_offset = if cell.v_align != VAlign::Top && rh > scale {
+                    let inner_h = (rh - (m.top + m.bottom) as f32 / 20.0 * scale).max(0.0);
+                    let content_h = measure_cell_content_h(fs, &cell.blocks, layout_w, scale);
+                    match cell.v_align {
+                        VAlign::Center => ((inner_h - content_h) / 2.0).max(0.0),
+                        VAlign::Bottom => (inner_h - content_h).max(0.0),
+                        VAlign::Top => 0.0,
+                    }
+                } else {
+                    0.0
+                };
+                let mut cur_abs = row_abs_y + m.top as f32 / 20.0 * scale + v_offset;
+                // Clip text at the row's bottom boundary to prevent overflow into adjacent rows.
+                // row_end is the absolute Y of this row's bottom; convert to canvas Y.
+                let clip_bottom = {
+                    let row_bottom_abs = row_end.min(page_top + content_h_px);
+                    let cell_bottom_abs = row_bottom_abs - m.bottom as f32 / 20.0 * scale;
+                    Some((margin_t_px + (cell_bottom_abs - page_top)).max(0.0))
+                };
                 render_cell_blocks(
                     fs, swash, rgba, out_w, out_h,
-                    &cell.blocks, inner_x, inner_w, &mut cur_abs,
+                    &cell.blocks, inner_x, inner_w, layout_w, clip_right, clip_bottom, &mut cur_abs,
                     page, page_top, content_h_px, margin_t_px, scale,
                 );
                 cell_x += cw;
@@ -1316,6 +1433,8 @@ fn render_table(
 
 /// Render blocks inside a table cell. `cur_abs` flows in absolute document
 /// coordinates so content crossing a page boundary appears on the next page.
+/// `layout_w`: buffer width for paragraph layout (use 99999 for no-wrap cells).
+/// `clip_right`: when Some(x), glyphs whose left edge >= x are skipped (no-wrap clip).
 #[allow(clippy::too_many_arguments)]
 fn render_cell_blocks(
     fs: &mut FontSystem,
@@ -1326,6 +1445,9 @@ fn render_cell_blocks(
     blocks: &[Block],
     inner_x: f32,
     inner_w: f32,
+    layout_w: f32,
+    clip_right: Option<f32>,
+    clip_bottom: Option<f32>,
     cur_abs: &mut f32,
     page: usize,
     page_top: f32,
@@ -1341,6 +1463,14 @@ fn render_cell_blocks(
                 let indent_l = p.indent_left_pt * scale;
                 let eff_x = inner_x + indent_l;
                 let eff_w = (inner_w - indent_l - p.indent_right_pt * scale).max(1.0);
+                // For no-wrap mode: left-aligned text uses large layout_w so it doesn't wrap
+                // and overflows past the cell boundary (clipped by clip_right).
+                // Center/right-aligned text always uses eff_w so alignment stays correct.
+                let shape_w = if layout_w > inner_w && p.align == Align::Left {
+                    layout_w
+                } else {
+                    eff_w
+                };
 
                 // Inline images (e.g. signature images inside cells)
                 for run in &p.runs {
@@ -1365,11 +1495,16 @@ fn render_cell_blocks(
                     }
                 }
 
-                let buf = layout_paragraph(fs, p, eff_w, scale);
+                let buf = layout_paragraph(fs, p, shape_w, scale);
                 let lh = buf.metrics().line_height;
                 let run_count = buf.layout_runs().count();
                 for run in buf.layout_runs() {
                     let line_abs = *cur_abs + run.line_top;
+                    // Skip lines below the cell's bottom clip boundary (fixed-height rows).
+                    if let Some(cb) = clip_bottom {
+                        let line_canvas_y = margin_t_px + (line_abs - page_top);
+                        if line_canvas_y >= cb { continue; }
+                    }
                     if page_of(line_abs, content_h_px) != page {
                         continue;
                     }
@@ -1378,9 +1513,14 @@ fn render_cell_blocks(
                         let phys = glyph.physical((0.0, 0.0), 1.0);
                         let color = glyph.color_opt.unwrap_or(Color::rgb(0, 0, 0));
                         let pen_x = eff_x + phys.x as f32;
+                        // Clip glyphs that start past the cell right boundary (no-wrap mode)
+                        if let Some(cr) = clip_right {
+                            if pen_x >= cr { continue; }
+                        }
                         let pen_y = baseline + phys.y as f32;
                         if let Some(img) = swash.get_image(fs, phys.cache_key) {
-                            blit_glyph(rgba, out_w, out_h, img, pen_x, pen_y, color);
+                            let cb_px = clip_bottom.map(|cb| cb as i32);
+                            blit_glyph(rgba, out_w, out_h, img, pen_x, pen_y, color, cb_px);
                         }
                     }
                 }
@@ -1388,6 +1528,7 @@ fn render_cell_blocks(
                 *cur_abs += para_space_after(p, scale);
             }
             Block::Table(nested) => {
+                // clip_bottom not propagated into nested tables â€” they manage their own row heights
                 render_table(
                     fs, swash, rgba, out_w, out_h, nested,
                     cur_abs, page, content_h_px, page_top,
@@ -1399,7 +1540,7 @@ fn render_cell_blocks(
     }
 }
 
-// ── drawing primitives ────────────────────────────────────────────────────────
+// â”€â”€ drawing primitives â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn fill_rect(
     rgba: &mut [u8],
@@ -1477,7 +1618,7 @@ fn draw_vert_line(
     }
 }
 
-// ── image decoding ────────────────────────────────────────────────────────────
+// â”€â”€ image decoding â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn blit_image(
     rgba: &mut Vec<u8>,
@@ -1505,7 +1646,7 @@ fn blit_image(
     }
 }
 
-// ── glyph blit ────────────────────────────────────────────────────────────────
+// â”€â”€ glyph blit â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn blit_glyph(
     rgba: &mut [u8],
@@ -1515,6 +1656,7 @@ fn blit_glyph(
     pen_x: f32,
     pen_y: f32,
     color: Color,
+    clip_bottom_px: Option<i32>,
 ) {
     let pw = img.placement.width as i32;
     let ph = img.placement.height as i32;
@@ -1525,22 +1667,31 @@ fn blit_glyph(
     let y0 = pen_y.round() as i32 - img.placement.top;
     let cr = color.r();
     let cg = color.g();
-    let cb = color.b();
+    let cb_color = color.b();
+    // Pixel rows below this y are clipped (cell bottom boundary).
+    let max_j = if let Some(cb) = clip_bottom_px {
+        (cb - y0).min(ph)
+    } else {
+        ph
+    };
+    if max_j <= 0 {
+        return;
+    }
 
     match img.content {
         SwashContent::Mask | SwashContent::SubpixelMask => {
-            for j in 0..ph {
+            for j in 0..max_j {
                 for i in 0..pw {
                     let a = img.data[(j * pw + i) as usize];
                     if a == 0 {
                         continue;
                     }
-                    put(rgba, w, h, x0 + i, y0 + j, cr, cg, cb, a);
+                    put(rgba, w, h, x0 + i, y0 + j, cr, cg, cb_color, a);
                 }
             }
         }
         SwashContent::Color => {
-            for j in 0..ph {
+            for j in 0..max_j {
                 for i in 0..pw {
                     let idx = ((j * pw + i) * 4) as usize;
                     let r = img.data[idx];
@@ -1578,7 +1729,7 @@ fn put(rgba: &mut [u8], w: usize, h: usize, x: i32, y: i32, r: u8, g: u8, b: u8,
     }
 }
 
-// ── layout page structs ───────────────────────────────────────────────────────
+// â”€â”€ layout page structs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -1679,11 +1830,11 @@ pub struct LpFrame { pub transform: LpTransform, pub parcel: LpParcel }
 #[serde(rename_all = "camelCase")]
 pub struct LpPage { pub width: f32, pub height: f32, pub frames: Vec<LpFrame> }
 
-// ── layout_page: extract text positions for text layer ────────────────────────
+// â”€â”€ layout_page: extract text positions for text layer â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 pub fn layout_page(fs: &mut FontSystem, doc: &Document, page_idx: usize) -> LpPage {
     // Fixed 2px-per-point scale for sub-point glyph precision; output converted back to points.
-    // Not tied to any canvas size — same result regardless of viewer zoom or page size.
+    // Not tied to any canvas size â€” same result regardless of viewer zoom or page size.
     let scale = 2.0_f32;
     let inv = 0.5_f32;
     let margin_l_px = doc.margin_l_pt * scale;
@@ -1851,7 +2002,7 @@ fn lp_table_line(
             let mut cell_abs = row_cursor + m.top as f32 / 20.0 * scale;
 
             let cell_parcel = lp_cell_parcel(
-                fs, &cell.blocks, inner_x, inner_w, &mut cell_abs,
+                fs, &cell.blocks, inner_x, inner_w, cell.no_wrap, &mut cell_abs,
                 page_idx, content_h_px, page_top, margin_t_px, scale, inv,
             );
 
@@ -1894,7 +2045,7 @@ fn lp_table_line(
 
 fn lp_cell_parcel(
     fs: &mut FontSystem, blocks: &[Block],
-    inner_x: f32, inner_w: f32, cur_abs: &mut f32,
+    inner_x: f32, inner_w: f32, no_wrap: bool, cur_abs: &mut f32,
     _page_idx: usize, _content_h_px: f32, _page_top: f32,
     _margin_t_px: f32, scale: f32, inv: f32,
 ) -> Option<LpParcel> {
@@ -1908,8 +2059,9 @@ fn lp_cell_parcel(
                 let indent_l = p.indent_left_pt * scale;
                 let eff_x = inner_x + indent_l;
                 let eff_w = (inner_w - indent_l - p.indent_right_pt * scale).max(1.0);
+                let shape_w = if no_wrap && p.align == crate::model::Align::Left { 99999.0 } else { eff_w };
 
-                let buf = layout_paragraph(fs, p, eff_w, scale);
+                let buf = layout_paragraph(fs, p, shape_w, scale);
                 let lh = buf.metrics().line_height;
                 let all_runs: Vec<_> = buf.layout_runs().collect();
                 let n = all_runs.len();
@@ -1975,3 +2127,4 @@ fn lp_cell_parcel(
         })
     }
 }
+

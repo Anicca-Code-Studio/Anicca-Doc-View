@@ -465,6 +465,7 @@ function computeSwitchGeometry(dir: SideDirection, slideW: number, slideH: numbe
                 p2Shift: [0, -1],
             };
     }
+    throw new Error(`Unhandled direction: ${dir}`);
 }
 
 function runSwitch(
@@ -868,8 +869,8 @@ function buildVortexMesh(cols: number, rows: number, slideW: number, slideH: num
             // the GL path visually matches the CSS fallback.
             const colN = c / Math.max(1, cols - 1);
             const rowN = r / Math.max(1, rows - 1);
-            let outSt: number;
-            let inSt: number;
+            let outSt = 0;
+            let inSt = 0;
             switch (dir) {
                 case "right":
                     outSt = colN * 0.7 + rowN * 0.3;

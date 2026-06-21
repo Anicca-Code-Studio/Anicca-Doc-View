@@ -1918,6 +1918,9 @@ pub fn parse(bytes: &[u8]) -> Result<Document, String> {
             page_count: 1,
             block_pages: Vec::new(),
             bytes: bytes.to_vec(),
+            page_dims: Vec::new(),
+            page_groups: Vec::new(),
+            doc_format: "docx".to_string(),
             embedded_fonts,
             header,
             footer,
@@ -1949,5 +1952,8 @@ pub fn parse(bytes: &[u8]) -> Result<Document, String> {
         header_margin_pt,
         footer_margin_pt,
         page_num_start,
+        page_dims: Vec::new(),
+        page_groups: Vec::new(),
+        doc_format: "docx".to_string(),
     })
 }

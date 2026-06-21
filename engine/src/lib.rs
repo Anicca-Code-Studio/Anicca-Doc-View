@@ -7,6 +7,7 @@
 pub mod docx;
 pub mod model;
 pub mod render;
+pub mod xlsx;
 
 use std::collections::HashMap;
 
@@ -54,9 +55,18 @@ struct PageInfoJs {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct PageGroupLayoutJs {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PageGroupJs {
+    name: String,
     start_page_index: usize,
     page_count: usize,
+    layout: PageGroupLayoutJs,
 }
 
 
@@ -153,9 +163,19 @@ impl Wasm {
     }
 
     pub fn load(&mut self, bytes: Vec<u8>) -> Result<String, JsValue> {
+        if xlsx::is_xlsx(&bytes) {
+            let mut doc = xlsx::parse(&bytes).map_err(|e| JsValue::from_str(&e))?;
+            // Two-pass: measure actual auto-height row expansion for correct canvas sizing
+            render::measure_xlsx_page_heights(&mut self.fonts, &mut doc);
+            let id = format!("doc-{}", self.next_id);
+            self.next_id += 1;
+            self.docs.insert(id.clone(), doc);
+            return Ok(id);
+        }
+
         if !docx::is_zip(&bytes) {
             return Err(JsValue::from_str(
-                "anicca-engine: only DOCX is supported in this build",
+                "anicca-engine: format not supported (DOCX and XLSX only)",
             ));
         }
         let mut doc = docx::parse(&bytes).map_err(|e| JsValue::from_str(&e))?;
@@ -174,8 +194,11 @@ impl Wasm {
         Ok(id)
     }
 
-    pub fn document_format(&self, _document_id: String) -> String {
-        "docx".to_string()
+    pub fn document_format(&self, document_id: String) -> String {
+        self.docs
+            .get(&document_id)
+            .map(|d| d.doc_format.clone())
+            .unwrap_or_else(|| "docx".to_string())
     }
 
     pub fn has_document(&self, document_id: String) -> bool {
@@ -198,11 +221,16 @@ impl Wasm {
         self.docs.get(&document_id).map(|d| d.page_count).unwrap_or(0)
     }
 
-    pub fn page_info(&self, document_id: String, _page_index: usize) -> Result<JsValue, JsValue> {
+    pub fn page_info(&self, document_id: String, page_index: usize) -> Result<JsValue, JsValue> {
         let doc = self.doc(&document_id)?;
+        let (width, height) = doc
+            .page_dims
+            .get(page_index)
+            .copied()
+            .unwrap_or((doc.page_w_pt, doc.page_h_pt));
         to_js(&PageInfoJs {
-            width: doc.page_w_pt,
-            height: doc.page_h_pt,
+            width,
+            height,
             rotation: 0,
         })
     }
@@ -210,10 +238,17 @@ impl Wasm {
     pub fn all_page_info(&self, document_id: String) -> Result<JsValue, JsValue> {
         let doc = self.doc(&document_id)?;
         let pages: Vec<PageInfoJs> = (0..doc.page_count)
-            .map(|_| PageInfoJs {
-                width: doc.page_w_pt,
-                height: doc.page_h_pt,
-                rotation: 0,
+            .map(|i| {
+                let (width, height) = doc
+                    .page_dims
+                    .get(i)
+                    .copied()
+                    .unwrap_or((doc.page_w_pt, doc.page_h_pt));
+                PageInfoJs {
+                    width,
+                    height,
+                    rotation: 0,
+                }
             })
             .collect();
         to_js(&pages)
@@ -221,9 +256,24 @@ impl Wasm {
 
     pub fn page_groups(&self, document_id: String) -> Result<JsValue, JsValue> {
         let doc = self.doc(&document_id)?;
+        if !doc.page_groups.is_empty() {
+            let groups: Vec<PageGroupJs> = doc
+                .page_groups
+                .iter()
+                .map(|g| PageGroupJs {
+                    name: g.name.clone(),
+                    start_page_index: g.start_page,
+                    page_count: g.page_count,
+                    layout: PageGroupLayoutJs { kind: "linear" },
+                })
+                .collect();
+            return to_js(&groups);
+        }
         to_js(&vec![PageGroupJs {
+            name: String::new(),
             start_page_index: 0,
             page_count: doc.page_count,
+            layout: PageGroupLayoutJs { kind: "linear" },
         }])
     }
 
@@ -338,11 +388,15 @@ impl Wasm {
         }
     }
 
-    /// Return the list of font family names declared in a DOCX document.
+    /// Return the list of font family names declared in a document.
     /// JS can use this to prefetch fonts before calling load().
     #[wasm_bindgen(js_name = getDeclaredFonts)]
     pub fn get_declared_fonts(&self, bytes: Vec<u8>) -> Result<JsValue, JsValue> {
-        let names = docx::extract_font_declarations(&bytes);
+        let names = if xlsx::is_xlsx(&bytes) {
+            xlsx::extract_font_declarations(&bytes)
+        } else {
+            docx::extract_font_declarations(&bytes)
+        };
         to_js(&names)
     }
 

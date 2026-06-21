@@ -27,33 +27,32 @@ import type {
     WorkerResponse,
 } from "./worker.js";
 
-import type {
-    JsOrientation as Orientation,
-    JsSideDirection as SideDirection,
-    JsCornerDirection as CornerDirection,
-    JsEightDirection as EightDirection,
-    JsInOutDirection as InOutDirection,
-    JsTransitionEffect as TransitionEffect,
-    JsFontSource as FontSource,
-    JsResolvedFontInfo as ResolvedFontInfo,
-    JsLayoutFrame as LayoutFrame,
-    JsLayoutParcel as LayoutParcel,
-    JsLayoutLine as LayoutLine,
-    JsLayoutRun as LayoutRun,
-    JsLayoutRunList as LayoutRunList,
-    JsLayoutRunContent as LayoutRunContent,
-    JsLayoutLineContent as LayoutLineContent,
-    JsLayoutTable as LayoutTable,
-    JsLayoutTableRow as LayoutTableRow,
-    JsLayoutTableCell as LayoutTableCell,
-    JsLayoutTableColumn as LayoutTableColumn,
-    JsLayoutGrid as LayoutGrid,
-    JsLayoutGridRow as LayoutGridRow,
-    JsLayoutGridCell as LayoutGridCell,
-    JsLayoutGridColumn as LayoutGridColumn,
-    JsLayoutGlyph as LayoutGlyph,
-    JsTransform as Transform,
-} from "../wasm/anicca-engine.js";
+// WASM types removed from generated bindings; use structural any until regenerated
+type Orientation = any;
+type SideDirection = any;
+type CornerDirection = any;
+type EightDirection = any;
+type InOutDirection = any;
+type TransitionEffect = any;
+type FontSource = any;
+type ResolvedFontInfo = any;
+type LayoutFrame = any;
+type LayoutParcel = any;
+type LayoutLine = any;
+type LayoutRun = any;
+type LayoutRunList = any;
+type LayoutRunContent = any;
+type LayoutLineContent = any;
+type LayoutTable = any;
+type LayoutTableRow = any;
+type LayoutTableCell = any;
+type LayoutTableColumn = any;
+type LayoutGrid = any;
+type LayoutGridRow = any;
+type LayoutGridCell = any;
+type LayoutGridColumn = any;
+type LayoutGlyph = any;
+type Transform = any;
 
 import { WORKER_INLINE } from "./worker-inline.js";
 import { resolveFonts } from "../fontResolver.js";
