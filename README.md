@@ -4,14 +4,15 @@ Universal document viewer for the web by Anicca Code Studio. Framework-agnostic,
 
 ## Supported formats
 
-- Word (`.docx`) — **implemented** (text, bold/italic, size, color, alignment, pagination, styles.xml resolution, heading outline, paragraph spacing, tables, images)
-- Excel (`.xlsx`) — **implemented** (multi-sheet workbooks, cell text and styles, bold/italic/color/font, borders, background fills, MDW column widths, VAlign, row heights, theme colors, shared strings, inlineStr rich text)
+- PDF (`.pdf`) is **implemented** (vector graphics, embedded TrueType/CFF/Type1/Type3/CID fonts with standard-14 substitution, images with soft and stencil masks, device and ICC/Indexed/Separation color, page rotation, outline/bookmarks, and a selectable, searchable text layer)
+- Word (`.docx`) is **implemented** (text, bold/italic, size, color, alignment, pagination, styles.xml resolution, heading outline, paragraph spacing)
+- Excel (`.xlsx`) is **implemented** (multi-sheet workbooks, cell formatting, borders, fill colors, column and row sizing)
+- PowerPoint (`.pptx`) is **implemented** (slides as pages, autoshapes with preset and custom geometry, solid and gradient fills, images, tables, bar/line/pie/area charts, placeholder inheritance from slide layouts and masters plus theme colors and fonts, and a selectable text layer)
 
-Roadmap (not yet available):
+Roadmap (engine in progress, not yet available):
 
-- Images (`.png`, `.jpg`, …)
-- PDF (`.pdf`)
-- PowerPoint (`.pptx`)
+- Images (`.png`, `.jpg`, ...)
+- PDF extras: encryption, gradient shadings/patterns, and annotation editing
 
 The rendering engine lives in [`engine/`](./engine) and is built separately; see [`engine/README.md`](./engine/README.md).
 

@@ -18,6 +18,10 @@ serde-wasm-bindgen = "0.6"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
 quick-xml = "0.37"
 
+# PDF stream decompression (FlateDecode). Pure Rust backend; already present in
+# the tree via zip/png, so this adds no new transitive dependencies.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 # Text shaping, layout, rasterization
 cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
 ttf-parser = "0.25"

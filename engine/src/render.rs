@@ -18,43 +18,14 @@ const EMU_PER_PT: f64 = 12700.0;
 
 pub fn new_font_system() -> FontSystem {
     let mut db = cosmic_text::fontdb::Database::new();
-    // Roboto: Google Docs default; documents exported from GDocs declare it.
-    db.load_font_data(include_bytes!("../fonts/Roboto-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Roboto-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Roboto-Italic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Roboto-BoldItalic.ttf").to_vec());
-    // Liberation Sans/Serif: metric-compatible with Arial / Times New Roman.
-    db.load_font_data(include_bytes!("../fonts/LiberationSans-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSans-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSans-Italic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSans-BoldItalic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSerif-Italic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/LiberationSerif-BoldItalic.ttf").to_vec());
-    // Times New Roman: exact match for documents that declare it.
-    db.load_font_data(include_bytes!("../fonts/TimesNewRoman.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/TimesNewRoman-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/TimesNewRoman-Italic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/TimesNewRoman-BoldItalic.ttf").to_vec());
-    // Carlito: metric-compatible with Calibri.
-    db.load_font_data(include_bytes!("../fonts/Carlito-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Carlito-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Carlito-Italic.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/Carlito-BoldItalic.ttf").to_vec());
-    // DejaVu Sans: wide Unicode coverage (Latin Extended, Cyrillic, Greek), last-resort only.
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Bold.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-Oblique.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/DejaVuSans-BoldOblique.ttf").to_vec());
-    // Noto fonts: multilingual fallback coverage.
-    // Japanese (hiragana, katakana, kanji), Arabic, Hebrew, Thai, Devanagari (Hindi).
-    // cosmic_text auto-selects these when a glyph is missing from the primary font.
-    db.load_font_data(include_bytes!("../fonts/NotoSansJP-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/NotoSansArabic-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/NotoSansHebrew-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/NotoSansThai-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../fonts/NotoSansDevanagari-Regular.ttf").to_vec());
+    // Bundled faces (see fonts_bundled.rs): Roboto (Google Docs default),
+    // Liberation Sans/Serif (metric-compatible with Arial / Times New Roman),
+    // Times New Roman, Carlito (Calibri-compatible), DejaVu Sans for wide
+    // Unicode coverage, and Noto faces for multilingual fallback. cosmic_text
+    // auto-selects a Noto face when a glyph is missing from the primary font.
+    for data in crate::fonts_bundled::ALL {
+        db.load_font_data(data.to_vec());
+    }
     db.set_sans_serif_family("Liberation Sans");
     db.set_serif_family("Liberation Serif");
     let fs = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
@@ -108,7 +79,7 @@ fn is_serif_name(lower: &str) -> bool {
 /// embedded in the DOCX) win; otherwise substitute a metric-compatible face:
 /// Arial-class names get Liberation Sans, Calibri gets Carlito, serif names
 /// get Liberation Serif, anything else falls back to Liberation Sans.
-fn resolve_family(name: &str) -> Family<'_> {
+pub(crate) fn resolve_family(name: &str) -> Family<'_> {
     let lower = name.to_ascii_lowercase();
     let available = family_set()
         .lock()
