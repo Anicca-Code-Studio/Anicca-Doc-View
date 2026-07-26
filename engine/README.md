@@ -45,8 +45,13 @@ class + `parseFontInfo`), so it drops in as `src/wasm/anicca-engine*`.
   `get_layout_page` (one frame per text box, plus table cells). Not yet:
   rotating a text box's glyphs, EMF/WMF/TIFF media, 3D/shadow/bevel effects, and
   SmartArt is best-effort (renders the cached diagram drawing when present).
-- **Images**: not yet implemented; `load` returns an explicit error. This is a
-  future milestone.
+- **Images**: implemented natively via a dedicated `image_fmt/` module of
+  from-scratch decoders: PNG, JPEG (baseline and progressive), GIF (incl. Adam7
+  interlace and palette + transparency), BMP, TIFF, ICO, TGA, PNM, and WebP
+  (lossy VP8, lossless VP8L, and VP8X extended with an alpha plane). An image
+  file opens as a single-page document sized from its pixel dimensions at its
+  declared DPI (fallback 96), rasterized on `raster.rs`. Not yet: TIFF files
+  that mix bit depths across samples.
 
 ## Layout
 
@@ -64,6 +69,7 @@ engine/
     raster.rs        # own 2D rasterizer (paths, fills, strokes, clips, images)
     pdf/             # from-scratch PDF: xref, filters, content, fonts, text
     pptx/            # from-scratch PPTX: DrawingML, geometry, theme, slides, charts
+    image_fmt/       # from-scratch image decoders (PNG/JPEG/GIF/BMP/TIFF/ICO/TGA/PNM/WebP)
 ```
 
 ## Prerequisites

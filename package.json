@@ -9,7 +9,7 @@
         "url": "https://github.com/anicca-code-studio/anicca-doc-view.git"
     },
     "homepage": "https://anicca-doc-view.web.app",
-    "description": "Universal document viewer for the web by Anicca Code Studio. Framework-agnostic viewer powered by a WebAssembly engine for high-fidelity rendering across PDF, DOCX, PPTX, XLSX, SVG, and images.",
+    "description": "Universal document viewer for the web by Anicca Code Studio. Framework-agnostic viewer powered by a WebAssembly engine for high-fidelity rendering across PDF, DOCX, PPTX, XLSX, and images.",
     "keywords": [
         "viewer",
         "pdf",
@@ -19,8 +19,6 @@
         "pptx",
         "pptx-viewer",
         "xlsx",
-        "svg",
-        "svg-viewer",
         "image",
         "image-viewer",
         "document",

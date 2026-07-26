@@ -8,10 +8,10 @@ Universal document viewer for the web by Anicca Code Studio. Framework-agnostic,
 - Word (`.docx`) is **implemented** (text, bold/italic, size, color, alignment, pagination, styles.xml resolution, heading outline, paragraph spacing)
 - Excel (`.xlsx`) is **implemented** (multi-sheet workbooks, cell formatting, borders, fill colors, column and row sizing)
 - PowerPoint (`.pptx`) is **implemented** (slides as pages, autoshapes with preset and custom geometry, solid and gradient fills, images, tables, bar/line/pie/area charts, placeholder inheritance from slide layouts and masters plus theme colors and fonts, and a selectable text layer)
+- Images are **implemented** (`.png`, `.jpg`/`.jpeg`, `.gif`, `.bmp`, `.tiff`, `.ico`, `.tga`, `.pnm`, `.webp` incl. lossy and lossless with alpha), each decoded by a from-scratch decoder and opened as a single-page document sized from its pixel dimensions and declared DPI
 
 Roadmap (engine in progress, not yet available):
 
-- Images (`.png`, `.jpg`, ...)
 - PDF extras: encryption, gradient shadings/patterns, and annotation editing
 
 The rendering engine lives in [`engine/`](./engine) and is built separately; see [`engine/README.md`](./engine/README.md).
@@ -45,9 +45,10 @@ await viewer.load({ url: "/documents/example.docx" });
 - Zero framework dependencies
 - No external network calls (no permit/telemetry servers)
 
-The viewer shell carries over the full feature set (search, annotations, panels,
-transitions); availability of each depends on engine support, which currently
-covers DOCX and XLSX.
+The viewer shell carries over the full feature set (search, text selection,
+panels, transitions); engine support covers PDF, DOCX, XLSX, PPTX, and images.
+Search and text selection run on the glyph text layer produced for PDF, DOCX,
+XLSX, and PPTX; image documents render as pages but carry no text layer.
 
 ## Theming
 
@@ -57,9 +58,7 @@ All styles are scoped under `.adv-viewer-root` and driven by `--adv-*` CSS custo
 
 This project is built and maintained in my free time after my day job, similar to how Laravel was first developed. Everything is completely free and open source. Your support really helps me keep developing, maintaining, and improving these tools for the developer community.
 
-On a personal note, I'm also saving up to finally meet my girlfriend in Kyrgyzstan. We've been in a long-distance relationship between Indonesia and Kyrgyzstan for quite a while. Every donation brings me one step closer to closing this distance and building our future together.
-
-Thank you so much. Your support means a lot to me, both for the project and for this part of my life. 🙏
+Thank you so much. Your support means a lot and keeps this project moving forward. 🙏
 
 | Platform | Link |
 |----------|------|
