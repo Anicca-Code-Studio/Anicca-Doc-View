@@ -40,9 +40,9 @@ const ATTRIBUTION_URL_B64 = "aHR0cHM6Ly9hbmljY2EuZGV2";
 const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 170 24" width="142" height="20" aria-hidden="true"><text x="0" y="17" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" font-size="15"><tspan class="logo-name" font-weight="700">Anicca</tspan><tspan class="logo-accent" font-weight="500" dx="5">Code Studio</tspan></text></svg>`;
 
 const LIGHT_NAME_FILL = "#0f172a";
-const LIGHT_ACCENT_FILL = "#4f46e5";
+const LIGHT_ACCENT_FILL = "#0d9488";
 const DARK_NAME_FILL = "#e2e8f0";
-const DARK_ACCENT_FILL = "#818cf8";
+const DARK_ACCENT_FILL = "#2dd4bf";
 
 export type BrandingVariant =
     /** Persistent corner badge in the viewport. Tripwire-monitored. */

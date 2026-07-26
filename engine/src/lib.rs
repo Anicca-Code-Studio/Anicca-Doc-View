@@ -6,6 +6,7 @@
 
 pub mod docx;
 pub mod fonts_bundled;
+pub mod image_fmt;
 pub mod model;
 pub mod pdf;
 pub mod pptx;
@@ -133,6 +134,7 @@ enum Loaded {
     Ooxml(Document),
     Pdf(pdf::PdfDocument),
     Pptx(pptx::PptxDocument),
+    Image(image_fmt::ImageDocument),
 }
 
 #[wasm_bindgen]
@@ -191,9 +193,14 @@ impl Wasm {
             return Ok(self.insert(Loaded::Pptx(doc)));
         }
 
+        if image_fmt::is_image(&bytes) {
+            let doc = image_fmt::parse(&bytes).map_err(|e| JsValue::from_str(&e))?;
+            return Ok(self.insert(Loaded::Image(doc)));
+        }
+
         if !docx::is_zip(&bytes) {
             return Err(JsValue::from_str(
-                "anicca-engine: format not supported (PDF, DOCX, XLSX and PPTX only)",
+                "anicca-engine: format not supported (PDF, DOCX, XLSX, PPTX and images only)",
             ));
         }
         let mut doc = docx::parse(&bytes).map_err(|e| JsValue::from_str(&e))?;
@@ -213,6 +220,7 @@ impl Wasm {
         match self.docs.get(&document_id) {
             Some(Loaded::Pdf(_)) => "pdf".to_string(),
             Some(Loaded::Pptx(_)) => "pptx".to_string(),
+            Some(Loaded::Image(_)) => "image".to_string(),
             Some(Loaded::Ooxml(d)) => d.doc_format.clone(),
             None => "docx".to_string(),
         }
@@ -238,6 +246,7 @@ impl Wasm {
         match self.docs.get(&document_id) {
             Some(Loaded::Pdf(p)) => p.page_count(),
             Some(Loaded::Pptx(p)) => p.page_count(),
+            Some(Loaded::Image(_)) => 1,
             Some(Loaded::Ooxml(d)) => d.page_count,
             None => 0,
         }
@@ -250,6 +259,9 @@ impl Wasm {
         if let Some(Loaded::Pptx(p)) = self.docs.get(&document_id) {
             let (width, height) = p.slide_size_pt();
             return to_js(&PageInfoJs { width, height, rotation: 0 });
+        }
+        if let Some(Loaded::Image(img)) = self.docs.get(&document_id) {
+            return to_js(&PageInfoJs { width: img.w_pt, height: img.h_pt, rotation: 0 });
         }
         let doc = self.ooxml(&document_id)?;
         let (width, height) = doc
@@ -275,6 +287,9 @@ impl Wasm {
                 .map(|_| PageInfoJs { width, height, rotation: 0 })
                 .collect();
             return to_js(&pages);
+        }
+        if let Some(Loaded::Image(img)) = self.docs.get(&document_id) {
+            return to_js(&vec![PageInfoJs { width: img.w_pt, height: img.h_pt, rotation: 0 }]);
         }
         let doc = self.ooxml(&document_id)?;
         let pages: Vec<PageInfoJs> = (0..doc.page_count)
@@ -308,6 +323,14 @@ impl Wasm {
                 name: String::new(),
                 start_page_index: 0,
                 page_count: p.page_count(),
+                layout: PageGroupLayoutJs { kind: "linear" },
+            }]);
+        }
+        if let Some(Loaded::Image(_)) = self.docs.get(&document_id) {
+            return to_js(&vec![PageGroupJs {
+                name: String::new(),
+                start_page_index: 0,
+                page_count: 1,
                 layout: PageGroupLayoutJs { kind: "linear" },
             }]);
         }
@@ -362,6 +385,7 @@ impl Wasm {
                 width,
                 height,
             ),
+            Loaded::Image(img) => render_image_rgba(img, width, height),
         };
         self.docs.insert(document_id, doc);
         Ok(rgba)
@@ -397,6 +421,9 @@ impl Wasm {
                 })
                 .collect();
             return to_js(&items);
+        }
+        if let Some(Loaded::Image(_)) = self.docs.get(&document_id) {
+            return to_js(&Vec::<OutlineItemJs>::new());
         }
         let doc = self.ooxml(&document_id)?;
         let mut entries: Vec<(u8, String, usize)> = Vec::new();
@@ -451,6 +478,9 @@ impl Wasm {
             let page = pptx::layout::layout_slide(&mut self.fonts, p, page_index);
             return to_js(&page);
         }
+        if let Some(Loaded::Image(img)) = self.docs.get(&document_id) {
+            return to_js(&render::LpPage { width: img.w_pt, height: img.h_pt, frames: Vec::new() });
+        }
         let doc = self.ooxml(&document_id)?.clone();
         let page = render::layout_page(&mut self.fonts, &doc, page_index);
         to_js(&page)
@@ -477,6 +507,7 @@ impl Wasm {
         match self.docs.get(&document_id) {
             Some(Loaded::Pdf(p)) => Ok(p.bytes().to_vec()),
             Some(Loaded::Pptx(p)) => Ok(p.bytes().to_vec()),
+            Some(Loaded::Image(img)) => Ok(img.bytes().to_vec()),
             Some(Loaded::Ooxml(d)) => Ok(d.bytes.clone()),
             None => Err(JsValue::from_str("document not found")),
         }
@@ -508,6 +539,8 @@ impl Wasm {
             xlsx::extract_font_declarations(&bytes)
         } else if pptx::is_pptx(&bytes) {
             pptx::parse(&bytes).map(|d| d.declared_fonts()).unwrap_or_default()
+        } else if image_fmt::is_image(&bytes) {
+            Vec::new()
         } else {
             docx::extract_font_declarations(&bytes)
         };
@@ -569,9 +602,27 @@ impl Wasm {
             Some(Loaded::Ooxml(d)) => Ok(d),
             Some(Loaded::Pdf(_)) => Err(JsValue::from_str("operation not valid for a PDF document")),
             Some(Loaded::Pptx(_)) => Err(JsValue::from_str("operation not valid for a PPTX document")),
+            Some(Loaded::Image(_)) => Err(JsValue::from_str("operation not valid for an image document")),
             None => Err(JsValue::from_str("document not found")),
         }
     }
+}
+
+/// Paints a decoded image onto a `width`x`height` RGBA canvas, filling it. The
+/// viewer sizes the canvas to the page aspect ratio, so the image maps to the
+/// full canvas without extra letterboxing here.
+fn render_image_rgba(img: &image_fmt::ImageDocument, width: usize, height: usize) -> Vec<u8> {
+    use raster::{Canvas, Clip, Transform};
+    let mut canvas = Canvas::new(width, height);
+    canvas.clear([255, 255, 255]);
+    if width == 0 || height == 0 {
+        return canvas.data;
+    }
+    // Map the image unit square to the whole canvas. draw_image treats row 0 as
+    // v = 1 (top), so send v = 1 to device y = 0.
+    let ctm = Transform::new(width as f64, 0.0, 0.0, -(height as f64), 0.0, height as f64);
+    canvas.draw_image(&img.bitmap, &ctm, &Clip::full(width, height), 1.0, true);
+    canvas.data
 }
 
 fn pdf_page_info(doc: &pdf::PdfDocument, index: usize) -> PageInfoJs {
